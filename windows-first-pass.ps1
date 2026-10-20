@@ -194,6 +194,14 @@ if ($EnvironmentNamesOnly) {
 Write-Section 'Identity and token'
 $whoami = Invoke-NativeRead -Name 'whoami.exe' -Arguments @('/all')
 Write-Result -Status $whoami.Status -Title 'Current token' -Source 'whoami /all' -Scope 'current process token' -Lines $whoami.Lines -Detail $whoami.Detail
+if ($whoami.Status -eq 'FOUND') {
+    $eventLogReadersRows = @($whoami.Lines | Where-Object {
+        $_ -match '(?<![0-9-])S-1-5-32-573(?![0-9-])'
+    })
+    if ($eventLogReadersRows.Count -gt 0) {
+        Write-Result -Status 'FOUND' -Title 'Event Log Readers SID in token' -Source 'whoami /all' -Scope 'current process token' -Lines $eventLogReadersRows -Detail 'inspect group attributes; check Security log access separately'
+    }
+}
 
 Write-Section 'Operating system'
 if (-not (Test-AvailableCommand 'Get-CimInstance')) {

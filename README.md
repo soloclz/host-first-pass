@@ -24,7 +24,7 @@ The environment section uses PowerShell's `[Environment]::GetEnvironmentVariable
 
 | Section | Source | Scope and output |
 | --- | --- | --- |
-| Identity and token | `whoami /all` | Current process token: user, groups, privileges, and integrity information. |
+| Identity and token | `whoami /all` | Current process token: user, groups, privileges, and integrity information. Highlights Event Log Readers SID (`S-1-5-32-573`) when present; inspect its attributes and check Security log access separately. |
 | Operating system | `Win32_OperatingSystem` via `Get-CimInstance` | Local OS name, version, build, and architecture. |
 | Running processes | `tasklist /fo csv /nh` | One compact `PID` and image name line per local running process. The header-free CSV is parsed into fields; unexpected output is reported as `ERROR`. |
 | Logon sessions | `quser` | Sessions visible on the local host to the current account, including state and logon time. |
