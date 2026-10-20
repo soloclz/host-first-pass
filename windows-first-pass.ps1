@@ -5,12 +5,15 @@
 .DESCRIPTION
     Prints the current token, OS, logon sessions, local network endpoints and
     their process/service owners, plus a few current-user credential-source
-    clues. No secret values, recursive file searches, network calls, or files
-    are produced by this script.
+    clues. By default, also prints all current-process environment variable
+    names and values. No recursive file searches, network calls, or files are
+    produced by this script.
+.PARAMETER EnvironmentNamesOnly
+    Print all current-process environment variable names without their values.
 #>
 
 [CmdletBinding()]
-param()
+param([switch]$EnvironmentNamesOnly)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -19,6 +22,28 @@ function Format-SafeText {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value) { return '' }
     return (([string]$Value) -replace '[\x00-\x1f\x7f]', ' ').Trim()
+}
+
+function ConvertTo-OneLineJsonString {
+    param([AllowNull()][object]$Value)
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    foreach ($unit in ([string]$Value).ToCharArray()) {
+        $code = [int]$unit
+        if ($code -eq 0x22) {
+            [void]$builder.Append('\"')
+        } elseif ($code -eq 0x5c) {
+            [void]$builder.Append('\\')
+        } elseif ($code -lt 0x20 -or $code -eq 0x7f -or $code -eq 0x85 -or
+                  $code -eq 0x2028 -or $code -eq 0x2029 -or
+                  ($code -ge 0xd800 -and $code -le 0xdfff)) {
+            [void]$builder.Append(('\u{0:x4}' -f $code))
+        } else {
+            [void]$builder.Append($unit)
+        }
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
 }
 
 function Write-Section {
@@ -147,6 +172,11 @@ try { $identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name } 
 Write-Output 'Windows first pass'
 Write-Output ('Time: {0} | Host: {1} | Identity: {2}' -f $runTime, $hostName, $identityName)
 Write-Output 'Scope: local host, current token and user profile; TCP Listen and bound UDP endpoints.'
+if ($EnvironmentNamesOnly) {
+    Write-Output 'Environment mode: all current PowerShell process names, no values.'
+} else {
+    Write-Output 'Environment mode: all current PowerShell process names and values (JSON-escaped).'
+}
 
 Write-Section 'Identity and token'
 $whoami = Invoke-NativeRead -Name 'whoami.exe' -Arguments @('/all')
@@ -316,11 +346,20 @@ $cmdkey = Invoke-NativeRead -Name 'cmdkey.exe' -Arguments @('/list') -SuccessSta
 Write-Result -Status $cmdkey.Status -Title 'Credential Manager metadata' -Source 'cmdkey /list' -Scope 'current user store; targets and account names' -Lines $cmdkey.Lines -Detail $cmdkey.Detail
 
 try {
-    $namePattern = '(?i)PASS(W(OR)?D)?|TOKEN|SECRET|CRED|AUTH|COOKIE|SESSION|PRIVATE|API[_-]?KEY|ACCESS[_-]?KEY|SSH[_-]?KEY'
-    $names = @([Environment]::GetEnvironmentVariables('Process').Keys |
-        Where-Object { [string]$_ -match $namePattern } | Sort-Object -Unique)
-    $envStatus = if ($names.Count -gt 0) { 'FOUND' } else { 'NONE' }
-    Write-Result -Status $envStatus -Title 'Selected environment variable names' -Source 'Process environment' -Scope 'current process; names only' -Lines $names -Detail ('matching names: {0}' -f $names.Count)
+    $environment = [Environment]::GetEnvironmentVariables('Process')
+    $environmentLines = @($environment.Keys | Sort-Object | ForEach-Object {
+        $name = [string]$_
+        $encodedName = ConvertTo-OneLineJsonString -Value $name
+        if ($EnvironmentNamesOnly) {
+            $encodedName
+        } else {
+            $encodedValue = ConvertTo-OneLineJsonString -Value ([string]$environment[$name])
+            '{0}={1}' -f $encodedName, $encodedValue
+        }
+    })
+    $envStatus = if ($environmentLines.Count -gt 0) { 'FOUND' } else { 'NONE' }
+    $envScope = if ($EnvironmentNamesOnly) { 'current PowerShell process; all names only' } else { 'current PowerShell process; all names and values' }
+    Write-Result -Status $envStatus -Title 'Environment variables' -Source "Environment.GetEnvironmentVariables('Process')" -Scope $envScope -Lines $environmentLines -Detail ('variables: {0}' -f $environmentLines.Count)
 } catch {
-    Write-Result -Status (Get-FailureStatus $_) -Title 'Selected environment variable names' -Source 'Process environment' -Scope 'current process; names only' -Detail (Get-FailureDetail $_)
+    Write-Result -Status (Get-FailureStatus $_) -Title 'Environment variables' -Source "Environment.GetEnvironmentVariables('Process')" -Scope 'current PowerShell process' -Detail (Get-FailureDetail $_)
 }

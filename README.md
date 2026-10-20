@@ -10,7 +10,15 @@ cd host-first-pass
 powershell.exe -NoProfile -File .\windows-first-pass.ps1
 ```
 
-The script prints plain text to the console and can be piped to `Tee-Object`. It does not write a report, contact another host, recursively search files, or print file contents, environment variable values, process command lines, or credential secret values. A shell transcript made outside the script can still capture the displayed host and account metadata.
+The default run prints every environment variable name and value in the current PowerShell process. To see every name without values, use:
+
+```powershell
+powershell.exe -NoProfile -File .\windows-first-pass.ps1 -EnvironmentNamesOnly
+```
+
+The script prints plain text to the console and can be piped to `Tee-Object`. It does not write a report, contact another host, recursively search files, or print file contents, process command lines, or Credential Manager secret values. Environment values can contain secrets; a shell transcript or a pipeline that saves the output will capture them.
+
+The environment section uses PowerShell's `[Environment]::GetEnvironmentVariables('Process')`. For a manual check in PowerShell, run `Get-ChildItem Env:`. In CMD, `set` prints `name=value` pairs; in PowerShell, bare `set` is an alias for `Set-Variable`.
 
 ## What it checks
 
@@ -23,7 +31,7 @@ The script prints plain text to the console and can be piped to `Tee-Object`. It
 | Owners | `Win32_Process`, `Win32_Service` via `Get-CimInstance` | Process name and executable path, and service names, for endpoint PIDs only. |
 | User profile | `Environment.SpecialFolder.UserProfile`, `Get-ChildItem` | Current user profile path, up to 100 top-level names, and up to 100 names, byte lengths, and modification times immediately inside `.ssh`; no file contents or recursion. Total entry counts show when output was capped. |
 | Credential Manager | `cmdkey /list` | Current user's stored target and account metadata; no stored passwords. |
-| Environment | Process environment variable names | Only names matching the built-in password, token, secret, credential, auth, cookie, session, private, or key terms. Values are never read for display. |
+| Environment | `[Environment]::GetEnvironmentVariables('Process')` | All names and values in the current PowerShell process by default; all names without values with `-EnvironmentNamesOnly`. Names and values are JSON-escaped so each pair stays on one console line. |
 
 Each probe shows its source, scope, and status. `FOUND` means the probe returned rows or the named path exists. `QUERY_OK` means `cmdkey /list` ran successfully; inspect its displayed text to tell whether entries are present. `NONE` means the query succeeded with no rows or the `.ssh` directory is absent. `DENIED` means access was refused, `ERROR` means a query failed, `UNAVAILABLE` means its command is missing, and `NOT_RUN` means a dependent query was skipped. An endpoint can disappear between the network and process queries, so a missing owner at query time needs a fresh check.
 
