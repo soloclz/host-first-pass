@@ -1,12 +1,12 @@
-# Windows first pass
+# Host first pass
 
 `windows-first-pass.ps1` prints a fixed, read-only snapshot when you first reach a Windows host. It uses Windows PowerShell 5.1 and has no required parameters.
 
 Clone the repository and run the script locally:
 
 ```powershell
-git clone https://github.com/soloclz/windows-first-pass.git
-cd windows-first-pass
+git clone https://github.com/soloclz/host-first-pass.git
+cd host-first-pass
 powershell.exe -NoProfile -File .\windows-first-pass.ps1
 ```
 
