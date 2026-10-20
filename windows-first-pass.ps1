@@ -3,8 +3,9 @@
 .SYNOPSIS
     Fixed, read-only first pass for a new Windows host.
 .DESCRIPTION
-    Prints the current token, OS, logon sessions, local network endpoints and
-    their process/service owners, plus a few current-user credential-source
+    Prints the current token, OS, running process names and PIDs, logon
+    sessions, current logon session Kerberos tickets, local network endpoints
+    and their process/service owners, plus a few current-user credential-source
     clues. By default, also prints all current-process environment variable
     names and values. No recursive file searches, network calls, or files are
     produced by this script.
@@ -131,9 +132,21 @@ function Invoke-NativeRead {
         $denied = ($exitCode -eq 5 -or
             $nativeError -match '(?i)access (is )?denied|0x0*5\b|拒絕存取|访问被拒绝')
         $status = if ($denied) { 'DENIED' } else { 'ERROR' }
-        return [pscustomobject]@{ Status = $status; Lines = @(); Detail = "exit code: $exitCode" }
+        $detail = "exit code: $exitCode"
+        if ($lines.Count -gt 0) {
+            $message = Format-SafeText $lines[0]
+            if ($message.Length -gt 160) { $message = $message.Substring(0, 160) + '...' }
+            if ($message) { $detail += "; message: $message" }
+        }
+        return [pscustomobject]@{ Status = $status; Lines = @(); Detail = $detail }
     }
-    $status = if ($lines.Count -gt 0) { $SuccessStatus } else { 'NONE' }
+    $status = if ($SuccessStatus -eq 'QUERY_OK') {
+        'QUERY_OK'
+    } elseif ($lines.Count -gt 0) {
+        'FOUND'
+    } else {
+        'NONE'
+    }
     return [pscustomobject]@{ Status = $status; Lines = $lines; Detail = ('lines: {0}' -f $lines.Count) }
 }
 
@@ -171,7 +184,7 @@ $identityName = '(unavailable)'
 try { $identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { }
 Write-Output 'Windows first pass'
 Write-Output ('Time: {0} | Host: {1} | Identity: {2}' -f $runTime, $hostName, $identityName)
-Write-Output 'Scope: local host, current token and user profile; TCP Listen and bound UDP endpoints.'
+Write-Output 'Scope: local host, current token, logon session and user profile; TCP Listen and bound UDP endpoints.'
 if ($EnvironmentNamesOnly) {
     Write-Output 'Environment mode: all current PowerShell process names, no values.'
 } else {
@@ -202,9 +215,36 @@ if (-not (Test-AvailableCommand 'Get-CimInstance')) {
     }
 }
 
+Write-Section 'Running processes'
+$tasklist = Invoke-NativeRead -Name 'tasklist.exe' -Arguments @('/fo', 'csv', '/nh')
+if ($tasklist.Status -notin @('FOUND', 'NONE')) {
+    Write-Result -Status $tasklist.Status -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Detail $tasklist.Detail
+} elseif ($tasklist.Status -eq 'NONE') {
+    Write-Result -Status 'NONE' -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Detail 'no rows returned'
+} else {
+    try {
+        $taskRows = @($tasklist.Lines | ConvertFrom-Csv -Header @('ImageName', 'PID', 'SessionName', 'SessionNumber', 'MemoryUsage') -ErrorAction Stop)
+        if ($taskRows.Count -ne $tasklist.Lines.Count) { throw 'Unexpected tasklist CSV row count.' }
+        $runningProcessLines = @($taskRows | ForEach-Object {
+            $pidText = ([string]$_.PID).Trim()
+            if ([string]::IsNullOrWhiteSpace($_.ImageName) -or $pidText -notmatch '^\d+$') {
+                throw 'Unexpected tasklist CSV fields.'
+            }
+            'PID={0} name={1}' -f $pidText, $_.ImageName
+        })
+        Write-Result -Status 'FOUND' -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Lines $runningProcessLines -Detail ('processes: {0}' -f $runningProcessLines.Count)
+    } catch {
+        Write-Result -Status 'ERROR' -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Detail 'unexpected tasklist CSV; no process rows shown'
+    }
+}
+
 Write-Section 'Logon sessions'
 $sessions = Invoke-NativeRead -Name 'quser.exe'
 Write-Result -Status $sessions.Status -Title 'User sessions' -Source 'quser' -Scope 'local host' -Lines $sessions.Lines -Detail $sessions.Detail
+
+Write-Section 'Kerberos tickets'
+$tickets = Invoke-NativeRead -Name 'klist.exe' -SuccessStatus 'QUERY_OK'
+Write-Result -Status $tickets.Status -Title 'Cached tickets' -Source 'klist' -Scope 'current logon session' -Lines $tickets.Lines -Detail $tickets.Detail
 
 Write-Section 'Network endpoints and owners'
 $tcpEndpoints = @()

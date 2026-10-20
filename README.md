@@ -26,14 +26,16 @@ The environment section uses PowerShell's `[Environment]::GetEnvironmentVariable
 | --- | --- | --- |
 | Identity and token | `whoami /all` | Current process token: user, groups, privileges, and integrity information. |
 | Operating system | `Win32_OperatingSystem` via `Get-CimInstance` | Local OS name, version, build, and architecture. |
+| Running processes | `tasklist /fo csv /nh` | One compact `PID` and image name line per local running process. The header-free CSV is parsed into fields; unexpected output is reported as `ERROR`. |
 | Logon sessions | `quser` | Sessions visible on the local host to the current account, including state and logon time. |
+| Kerberos tickets | `klist` | Tickets cached in the current logon session; read the displayed ticket count, principals, and times. |
 | Network endpoints | `Get-NetTCPConnection` filtered to `State=Listen`, `Get-NetUDPEndpoint` | All local TCP listeners and bound UDP endpoints, with address, port, and PID. |
 | Owners | `Win32_Process`, `Win32_Service` via `Get-CimInstance` | Process name and executable path, and service names, for endpoint PIDs only. |
 | User profile | `Environment.SpecialFolder.UserProfile`, `Get-ChildItem` | Current user profile path, up to 100 top-level names, and up to 100 names, byte lengths, and modification times immediately inside `.ssh`; no file contents or recursion. Total entry counts show when output was capped. |
 | Credential Manager | `cmdkey /list` | Current user's stored target and account metadata; no stored passwords. |
 | Environment | `[Environment]::GetEnvironmentVariables('Process')` | All names and values in the current PowerShell process by default; all names without values with `-EnvironmentNamesOnly`. Names and values are JSON-escaped so each pair stays on one console line. |
 
-Each probe shows its source, scope, and status. `FOUND` means the probe returned rows or the named path exists. `QUERY_OK` means `cmdkey /list` ran successfully; inspect its displayed text to tell whether entries are present. `NONE` means the query succeeded with no rows or the `.ssh` directory is absent. `DENIED` means access was refused, `ERROR` means a query failed, `UNAVAILABLE` means its command is missing, and `NOT_RUN` means a dependent query was skipped. An endpoint can disappear between the network and process queries, so a missing owner at query time needs a fresh check.
+Each probe shows its source, scope, and status. `FOUND` means the probe returned rows or the named path exists. `QUERY_OK` means `cmdkey /list` or `klist` ran successfully; inspect the displayed text to tell whether stored targets or cached tickets are present. `NONE` means the query succeeded with no rows or the `.ssh` directory is absent. `DENIED` means access was refused, `ERROR` means a query failed, `UNAVAILABLE` means its command is missing, and `NOT_RUN` means a dependent query was skipped. An endpoint can disappear between the network and process queries, so a missing owner at query time needs a fresh check.
 
 The snapshot is an index of leads. Investigate a specific process, service, store, or path with your normal notes after reviewing the output.
 
