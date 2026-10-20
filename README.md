@@ -26,6 +26,7 @@ The environment section uses PowerShell's `[Environment]::GetEnvironmentVariable
 | --- | --- | --- |
 | Identity and token | `whoami /all` | Current process token: user, groups, privileges, and integrity information. Highlights Event Log Readers SID (`S-1-5-32-573`) when present; inspect its attributes and check Security log access separately. |
 | Operating system | `Win32_OperatingSystem` via `Get-CimInstance` | Local OS name, version, build, and architecture. |
+| UAC policy | `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` | Raw `EnableLUA` and `ConsentPromptBehaviorAdmin` values. `EnableLUA=1` enables Admin Approval Mode; `ConsentPromptBehaviorAdmin=5` is the default prompt for consent for non-Windows binaries. Compare the policy with the current process token above when assessing elevation. |
 | Running processes | `tasklist /fo csv /nh` | One compact `PID` and image name line per local running process. The header-free CSV is parsed into fields; unexpected output is reported as `ERROR`. |
 | Logon sessions | `quser` | Sessions visible on the local host to the current account, including state and logon time. |
 | Kerberos tickets | `klist` | Tickets cached in the current logon session; read the displayed ticket count, principals, and times. |

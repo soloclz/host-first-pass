@@ -3,7 +3,7 @@
 .SYNOPSIS
     Fixed, read-only first pass for a new Windows host.
 .DESCRIPTION
-    Prints the current token, OS, running process names and PIDs, logon
+    Prints the current token, OS and UAC policy, running process names and PIDs, logon
     sessions, current logon session Kerberos tickets, local network endpoints
     and their process/service owners, plus a few current-user credential-source
     clues. By default, also prints all current-process environment variable
@@ -220,6 +220,43 @@ if (-not (Test-AvailableCommand 'Get-CimInstance')) {
         }
     } catch {
         Write-Result -Status (Get-FailureStatus $_) -Title 'OS version and build' -Source 'Win32_OperatingSystem' -Scope 'local host' -Detail (Get-FailureDetail $_)
+    }
+}
+
+Write-Section 'UAC policy'
+$uacPolicyPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+foreach ($name in @('EnableLUA', 'ConsentPromptBehaviorAdmin')) {
+    try {
+        $policyKey = Get-Item -LiteralPath $uacPolicyPath -ErrorAction Stop
+        if ($policyKey.GetValueNames() -notcontains $name) {
+            Write-Result -Status 'NONE' -Title $name -Source $uacPolicyPath -Scope 'local host' -Detail 'value absent'
+            continue
+        }
+
+        $value = $policyKey.GetValue($name)
+        $kind = $policyKey.GetValueKind($name)
+        $meaning = if ($kind -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+            "unexpected registry type: $kind"
+        } elseif ($name -eq 'EnableLUA') {
+            switch ([string]$value) {
+                '0' { 'Admin Approval Mode disabled' }
+                '1' { 'Admin Approval Mode enabled (default)' }
+                default { 'unrecognized value' }
+            }
+        } else {
+            switch ([string]$value) {
+                '0' { 'elevate without prompting' }
+                '1' { 'prompt for credentials on secure desktop' }
+                '2' { 'prompt for consent on secure desktop' }
+                '3' { 'prompt for credentials' }
+                '4' { 'prompt for consent' }
+                '5' { 'prompt for consent for non-Windows binaries (default)' }
+                default { 'unrecognized value' }
+            }
+        }
+        Write-Result -Status 'FOUND' -Title $name -Source $uacPolicyPath -Scope 'local host' -Lines @("$name=$value") -Detail $meaning
+    } catch {
+        Write-Result -Status (Get-FailureStatus $_) -Title $name -Source $uacPolicyPath -Scope 'local host' -Detail (Get-FailureDetail $_)
     }
 }
 
