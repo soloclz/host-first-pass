@@ -33,6 +33,7 @@ The environment section uses PowerShell's `[Environment]::GetEnvironmentVariable
 | Network endpoints | `Get-NetTCPConnection` filtered to `State=Listen`, `Get-NetUDPEndpoint` | All local TCP listeners and bound UDP endpoints, with address, port, and PID. |
 | Owners | `Win32_Process`, `Win32_Service` via `Get-CimInstance` | Process name and executable path, and service names, for endpoint PIDs only. |
 | User profile | `Environment.SpecialFolder.UserProfile`, `Get-ChildItem` | Current user profile path, up to 100 top-level names, and up to 100 names, byte lengths, and modification times immediately inside `.ssh`; no file contents or recursion. Total entry counts show when output was capped. |
+| Sticky Notes database | `Environment.SpecialFolder.LocalApplicationData`, `Test-Path` | Checks whether `plum.sqlite` exists at the current user's fixed Sticky Notes package path; prints the path when found, not the notes. |
 | Credential Manager | `cmdkey /list` | Current user's stored target and account metadata; no stored passwords. |
 | Environment | `[Environment]::GetEnvironmentVariables('Process')` | All names and values in the current PowerShell process by default; all names without values with `-EnvironmentNamesOnly`. Names and values are JSON-escaped so each pair stays on one console line. |
 

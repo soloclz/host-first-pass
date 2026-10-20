@@ -427,6 +427,26 @@ if ($null -ne $profileError) {
     }
 }
 
+$localAppDataPath = ''
+$localAppDataError = $null
+try { $localAppDataPath = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData) } catch { $localAppDataError = $_ }
+if ($null -ne $localAppDataError) {
+    Write-Result -Status (Get-FailureStatus $localAppDataError) -Title 'Sticky Notes database path' -Source 'Environment.SpecialFolder.LocalApplicationData' -Scope 'current user' -Detail (Get-FailureDetail $localAppDataError)
+} elseif ([string]::IsNullOrWhiteSpace($localAppDataPath)) {
+    Write-Result -Status 'NOT_RUN' -Title 'Sticky Notes database path' -Source 'Test-Path' -Scope 'current user, fixed package path' -Detail 'LocalApplicationData path unavailable'
+} else {
+    $stickyNotesPath = Join-Path -Path $localAppDataPath -ChildPath 'Packages\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe\LocalState\plum.sqlite'
+    try {
+        if (Test-Path -LiteralPath $stickyNotesPath -PathType Leaf -ErrorAction Stop) {
+            Write-Result -Status 'FOUND' -Title 'Sticky Notes database path' -Source 'Test-Path' -Scope 'current user, fixed package path' -Lines @($stickyNotesPath)
+        } else {
+            Write-Result -Status 'NONE' -Title 'Sticky Notes database path' -Source 'Test-Path' -Scope 'current user, fixed package path' -Detail 'plum.sqlite absent at this path'
+        }
+    } catch {
+        Write-Result -Status (Get-FailureStatus $_) -Title 'Sticky Notes database path' -Source 'Test-Path' -Scope 'current user, fixed package path' -Detail (Get-FailureDetail $_)
+    }
+}
+
 $cmdkey = Invoke-NativeRead -Name 'cmdkey.exe' -Arguments @('/list') -SuccessStatus 'QUERY_OK'
 Write-Result -Status $cmdkey.Status -Title 'Credential Manager metadata' -Source 'cmdkey /list' -Scope 'current user store; targets and account names' -Lines $cmdkey.Lines -Detail $cmdkey.Detail
 
