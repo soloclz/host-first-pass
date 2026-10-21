@@ -3,8 +3,9 @@
 .SYNOPSIS
     Fixed, read-only first pass for a new Windows host.
 .DESCRIPTION
-    Prints the current token, OS and UAC policy, running process names and PIDs, logon
-    sessions, current logon session Kerberos tickets, local network endpoints
+    Prints the current token, OS build and QFE records, UAC policy, running process
+    names and PIDs, logon sessions, current logon session Kerberos tickets,
+    local network endpoints
     and their process/service owners, plus a few current-user credential-source
     clues. By default, also prints all current-process environment variable
     names and values. No recursive file searches, network calls, or files are
@@ -220,6 +221,38 @@ if (-not (Test-AvailableCommand 'Get-CimInstance')) {
         }
     } catch {
         Write-Result -Status (Get-FailureStatus $_) -Title 'OS version and build' -Source 'Win32_OperatingSystem' -Scope 'local host' -Detail (Get-FailureDetail $_)
+    }
+}
+
+$buildKeyPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+try {
+    $buildKey = Get-Item -LiteralPath $buildKeyPath -ErrorAction Stop
+    $currentBuild = [string]$buildKey.GetValue('CurrentBuild')
+    $ubr = $buildKey.GetValue('UBR')
+    if ([string]::IsNullOrWhiteSpace($currentBuild) -or $null -eq $ubr) {
+        Write-Result -Status 'NONE' -Title 'Full OS build' -Source $buildKeyPath -Scope 'local host' -Detail 'CurrentBuild or UBR value absent'
+    } else {
+        Write-Result -Status 'FOUND' -Title 'Full OS build' -Source $buildKeyPath -Scope 'local host' -Lines @(('CurrentBuild={0}; UBR={1}; full={0}.{1}' -f $currentBuild, $ubr))
+    }
+} catch {
+    Write-Result -Status (Get-FailureStatus $_) -Title 'Full OS build' -Source $buildKeyPath -Scope 'local host' -Detail (Get-FailureDetail $_)
+}
+
+Write-Section 'Installed OS updates'
+if (-not (Test-AvailableCommand 'Get-CimInstance')) {
+    Write-Result -Status 'UNAVAILABLE' -Title 'QFE records' -Source 'Win32_QuickFixEngineering' -Scope 'local host; CBS-reported updates' -Detail 'Get-CimInstance not installed'
+} else {
+    try {
+        $qfeRecords = @(Get-CimInstance -ClassName Win32_QuickFixEngineering -Property HotFixID, InstalledOn -ErrorAction Stop)
+        $qfeLines = @($qfeRecords | Sort-Object HotFixID | ForEach-Object {
+            $id = if ($_.HotFixID) { [string]$_.HotFixID } else { '(not reported)' }
+            $installedOn = if ($_.InstalledOn) { [string]$_.InstalledOn } else { '(not reported)' }
+            'HotFixID={0}; InstalledOn={1}' -f $id, $installedOn
+        })
+        $qfeStatus = if ($qfeRecords.Count -gt 0) { 'FOUND' } else { 'NONE' }
+        Write-Result -Status $qfeStatus -Title 'QFE records' -Source 'Win32_QuickFixEngineering' -Scope 'local host; CBS-reported updates' -Lines $qfeLines -Detail ('records: {0}' -f $qfeRecords.Count)
+    } catch {
+        Write-Result -Status (Get-FailureStatus $_) -Title 'QFE records' -Source 'Win32_QuickFixEngineering' -Scope 'local host; CBS-reported updates' -Detail (Get-FailureDetail $_)
     }
 }
 
