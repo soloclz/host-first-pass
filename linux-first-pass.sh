@@ -7,6 +7,9 @@ export LC_ALL=C
 MAX_LINES=500
 MAX_BYTES=131072
 SCAN_SECONDS=8
+ROOT_METADATA_SECONDS=30
+ROOT_CONTENT_SECONDS=90
+ROOT_FILE_BYTES=262144
 ENV_NAMES_ONLY=0
 CURRENT_HOME=${HOME:-}
 
@@ -87,7 +90,7 @@ run_probe() {
   if (( limited )); then
     detail="$detail; capture INCOMPLETE: first $MAX_LINES lines or $MAX_BYTES bytes; remainder unknown"
   elif (( rc == 124 || rc == 137 )); then
-    detail="$detail; scan stopped at ${SCAN_SECONDS}s; query partial"
+    detail="$detail; scan stopped at the stated time limit; query partial"
   elif (( rc == 141 )); then
     detail="$detail; producer stopped before completion"
   fi
@@ -240,6 +243,61 @@ scan_paths() {
   esac
 }
 
+scan_root() {
+  local kind=$1 seconds=$ROOT_METADATA_SECONDS
+  if ! have find || ! have timeout; then
+    printf 'find or timeout unavailable\n' >&2
+    return 127
+  fi
+  case $kind in
+    flag-content|credential-content)
+      if ! have grep; then
+        printf 'grep unavailable\n' >&2
+        return 127
+      fi
+      seconds=$ROOT_CONTENT_SECONDS
+      # -size with c is byte-accurate; -readable limits the content query to
+      # files this identity can open. GNU find still reports denied directories.
+      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
+        -type f -size "-${ROOT_FILE_BYTES}c" -readable \
+        -exec sh -c '
+          kind=$1
+          shift
+          if [ "$kind" = flag-content ]; then
+            grep -IilF -e "HTB{" -e "flag{" -- "$@"
+          else
+            grep -IilE "pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key" -- "$@"
+          fi
+          code=$?
+          [ "$code" -eq 0 ] || [ "$code" -eq 1 ]
+        ' sh "$kind" '{}' +
+      ;;
+    candidate-names)
+      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
+        -mindepth 1 -type f \
+        \( -iname '*flag*' -o -iname '*password*' -o -iname '*secret*' \
+           -o -iname '*credential*' -o -iname '*token*' -o -iname '*note*' \
+           -o -iname '*.env' -o -iname '*.bak' -o -iname '*.old' \) \
+        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ;;
+    writable)
+      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
+        -mindepth 1 \
+        \( \( -type d -writable -executable \) -o \( -type f -writable \) \) \
+        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ;;
+    suid-sgid)
+      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
+        -mindepth 1 -type f \( -perm -4000 -o -perm -2000 \) \
+        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ;;
+    *)
+      printf 'unknown root scan kind: %s\n' "$kind" >&2
+      return 2
+      ;;
+  esac
+}
+
 show_defense_tools() {
   local tool path
   for tool in nft iptables fail2ban-client snort; do
@@ -333,9 +391,11 @@ printf 'Time: %s | Host: %s | Identity: %s\n' \
   "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unavailable)" \
   "$(hostname 2>/dev/null || printf unavailable)" \
   "$(id -un 2>/dev/null || printf unavailable)"
-printf 'Scope: local Linux host, current identity, and named bounded file roots.\n'
+printf 'Scope: local Linux host, current identity, root filesystem starting at /, and named bounded file roots.\n'
 printf 'Named find scans: max depth 2-4, one filesystem per root, %ss per scan. Capture cap per probe: %d lines or %d bytes.\n' \
   "$SCAN_SECONDS" "$MAX_LINES" "$MAX_BYTES"
+printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; content files < %d bytes.\n' \
+  "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS" "$ROOT_FILE_BYTES"
 if (( ENV_NAMES_ONLY )); then
   printf 'Environment: names only from this script process.\n'
 else
@@ -422,6 +482,15 @@ run_probe 'Static mount entries' '/etc/fstab (selected fields)' \
 run_probe 'Printers' 'lpstat -p -d' 'local printer status if tool is installed' lpstat -p -d
 
 section 'Interesting file candidates'
+run_probe 'Flag-like text markers from /' 'find / -xdev + grep -IilF' \
+  "/ on root filesystem; readable regular files <${ROOT_FILE_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
+  scan_root flag-content
+run_probe 'Credential-like text markers from /' 'find / -xdev + grep -IilE' \
+  "/ on root filesystem; readable regular files <${ROOT_FILE_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
+  scan_root credential-content
+run_probe 'Interesting filenames from /' 'find / -xdev -type f' \
+  "/ on root filesystem; selected name patterns; metadata only; ${ROOT_METADATA_SECONDS}s" \
+  scan_root candidate-names
 if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
   run_probe 'Hidden paths in current home' 'find hidden names' \
     "$HOME; depth<=4; same filesystem; ${SCAN_SECONDS}s" \
@@ -459,6 +528,12 @@ for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups
 done
 
 section 'Writable and privilege-related file candidates'
+run_probe 'Writable paths from /' 'find / -xdev -writable' \
+  "/ on root filesystem; writable regular files and writable traversable directories; ${ROOT_METADATA_SECONDS}s" \
+  scan_root writable
+run_probe 'SUID or SGID files from /' 'find / -xdev -perm -4000/-2000' \
+  "/ on root filesystem; regular files; ${ROOT_METADATA_SECONDS}s" \
+  scan_root suid-sgid
 for root in "${HOME:-}" /etc /usr/local /opt /srv /app /var/www /var/backups /tmp /var/tmp /dev/shm /mnt /media /root; do
   [[ -n $root ]] || continue
   depth=3
