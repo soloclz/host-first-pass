@@ -175,8 +175,14 @@ function Format-Endpoint {
     } else {
         '(no matching service)'
     }
-    return ('{0} {1}:{2} PID={3} process={4} service={5}' -f $Protocol, $address,
-        $Endpoint.LocalPort, $endpointProcessId, $processText, $serviceText)
+    $endpointText = '{0} {1}:{2}' -f $Protocol, $address, $Endpoint.LocalPort
+    if ($Protocol -eq 'TCP Established') {
+        $remoteAddress = [string]$Endpoint.RemoteAddress
+        if ($remoteAddress.Contains(':')) { $remoteAddress = '[{0}]' -f $remoteAddress }
+        $endpointText += (' -> {0}:{1}' -f $remoteAddress, $Endpoint.RemotePort)
+    }
+    return ('{0} PID={1} process={2} service={3}' -f $endpointText,
+        $endpointProcessId, $processText, $serviceText)
 }
 
 $runTime = Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'
@@ -185,7 +191,7 @@ $identityName = '(unavailable)'
 try { $identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { }
 Write-Output 'Windows first pass'
 Write-Output ('Time: {0} | Host: {1} | Identity: {2}' -f $runTime, $hostName, $identityName)
-Write-Output 'Scope: local host, current token, logon session and user profile; TCP Listen and bound UDP endpoints.'
+Write-Output 'Scope: local host, current token, logon session and user profile; TCP Listen/Established and bound UDP endpoints.'
 if ($EnvironmentNamesOnly) {
     Write-Output 'Environment mode: all current PowerShell process names, no values.'
 } else {
@@ -381,23 +387,35 @@ Write-Result -Status $tickets.Status -Title 'Cached tickets' -Source 'klist' -Sc
 
 Write-Section 'Network endpoints and PID mappings'
 $tcpEndpoints = @()
+$tcpEstablishedEndpoints = @()
 $udpEndpoints = @()
 $tcpStatus = 'NOT_RUN'
+$tcpEstablishedStatus = 'NOT_RUN'
 $udpStatus = 'NOT_RUN'
 $tcpDetail = ''
+$tcpEstablishedDetail = ''
 $udpDetail = ''
 
 if (Test-AvailableCommand 'Get-NetTCPConnection') {
     try {
-        $tcpEndpoints = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.State -eq 'Listen' })
+        $tcpConnections = @(Get-NetTCPConnection -ErrorAction Stop)
+        $tcpEndpoints = @($tcpConnections | Where-Object { $_.State -eq 'Listen' })
+        $tcpEstablishedEndpoints = @($tcpConnections | Where-Object { $_.State -eq 'Established' })
         $tcpStatus = if ($tcpEndpoints.Count -gt 0) { 'FOUND' } else { 'NONE' }
+        $tcpEstablishedStatus = if ($tcpEstablishedEndpoints.Count -gt 0) { 'FOUND' } else { 'NONE' }
     } catch {
+        $tcpEndpoints = @()
+        $tcpEstablishedEndpoints = @()
         $tcpStatus = Get-FailureStatus $_
+        $tcpEstablishedStatus = $tcpStatus
         $tcpDetail = Get-FailureDetail $_
+        $tcpEstablishedDetail = $tcpDetail
     }
 } else {
     $tcpStatus = 'UNAVAILABLE'
+    $tcpEstablishedStatus = 'UNAVAILABLE'
     $tcpDetail = 'Get-NetTCPConnection not installed'
+    $tcpEstablishedDetail = $tcpDetail
 }
 
 if (Test-AvailableCommand 'Get-NetUDPEndpoint') {
@@ -419,8 +437,9 @@ $processStatus = 'NOT_RUN'
 $serviceStatus = 'NOT_RUN'
 $processDetail = 'no endpoint PID available from completed queries'
 $serviceDetail = 'no endpoint PID available from completed queries'
+$tcpEstablishedShown = @($tcpEstablishedEndpoints | Sort-Object LocalPort, LocalAddress, RemotePort, RemoteAddress, OwningProcess | Select-Object -First 100)
 $endpointIds = @{}
-foreach ($endpoint in @($tcpEndpoints) + @($udpEndpoints)) {
+foreach ($endpoint in @($tcpEndpoints) + @($tcpEstablishedShown) + @($udpEndpoints)) {
     $endpointIds[[int]$endpoint.OwningProcess] = $true
 }
 
@@ -461,12 +480,21 @@ if ($endpointIds.Count -gt 0) {
 $tcpLines = @($tcpEndpoints | Sort-Object LocalPort, LocalAddress, OwningProcess | ForEach-Object {
     Format-Endpoint -Endpoint $_ -Protocol 'TCP' -Processes $processes -Services $services -ProcessStatus $processStatus -ServiceStatus $serviceStatus
 })
+$tcpEstablishedLines = @($tcpEstablishedShown | ForEach-Object {
+    Format-Endpoint -Endpoint $_ -Protocol 'TCP Established' -Processes $processes -Services $services -ProcessStatus $processStatus -ServiceStatus $serviceStatus
+})
 $udpLines = @($udpEndpoints | Sort-Object LocalPort, LocalAddress, OwningProcess | ForEach-Object {
     Format-Endpoint -Endpoint $_ -Protocol 'UDP' -Processes $processes -Services $services -ProcessStatus $processStatus -ServiceStatus $serviceStatus
 })
 $tcpReportDetail = if ($tcpStatus -in @('FOUND', 'NONE')) { 'count: {0}' -f $tcpEndpoints.Count } else { $tcpDetail }
+$tcpEstablishedNotShown = $tcpEstablishedEndpoints.Count - $tcpEstablishedLines.Count
+$tcpEstablishedDisplay = if ($tcpEstablishedNotShown -gt 0) { 'TRUNCATED' } else { 'COMPLETE' }
+$tcpEstablishedReportDetail = if ($tcpEstablishedStatus -in @('FOUND', 'NONE')) {
+    'connections: {0}; shown: {1}; not shown: {2}; display: {3}' -f $tcpEstablishedEndpoints.Count, $tcpEstablishedLines.Count, $tcpEstablishedNotShown, $tcpEstablishedDisplay
+} else { $tcpEstablishedDetail }
 $udpReportDetail = if ($udpStatus -in @('FOUND', 'NONE')) { 'count: {0}' -f $udpEndpoints.Count } else { $udpDetail }
 Write-Result -Status $tcpStatus -Title 'TCP listeners' -Source 'Get-NetTCPConnection (State=Listen)' -Scope 'all local addresses' -Lines $tcpLines -Detail $tcpReportDetail
+Write-Result -Status $tcpEstablishedStatus -Title 'TCP established connections' -Source 'Get-NetTCPConnection (State=Established)' -Scope 'local host, all remote addresses' -Lines $tcpEstablishedLines -Detail $tcpEstablishedReportDetail
 Write-Result -Status $udpStatus -Title 'UDP bindings' -Source 'Get-NetUDPEndpoint' -Scope 'all local addresses' -Lines $udpLines -Detail $udpReportDetail
 Write-Result -Status $processStatus -Title 'Endpoint process metadata' -Source 'Win32_Process' -Scope 'endpoint PIDs only' -Detail $processDetail
 Write-Result -Status $serviceStatus -Title 'Endpoint service mapping' -Source 'Win32_Service' -Scope 'endpoint PIDs only' -Detail $serviceDetail
@@ -491,7 +519,9 @@ if ($null -ne $profileError) {
             if ($_.PSIsContainer) { '[dir] {0}' -f $_.Name } else { '[file] {0}' -f $_.Name }
         })
         $profileStatus = if ($profileItems.Count -gt 0) { 'FOUND' } else { 'NONE' }
-        Write-Result -Status $profileStatus -Title 'Profile top-level names' -Source 'Get-ChildItem' -Scope 'current user profile, top level' -Lines $profileNames -Detail ('entries: {0}; shown: {1}' -f $profileItems.Count, $profileNames.Count)
+        $profileNotShown = $profileItems.Count - $profileNames.Count
+        $profileDisplay = if ($profileNotShown -gt 0) { 'TRUNCATED' } else { 'COMPLETE' }
+        Write-Result -Status $profileStatus -Title 'Profile top-level names' -Source 'Get-ChildItem' -Scope 'current user profile, top level' -Lines $profileNames -Detail ('entries: {0}; shown: {1}; not shown: {2}; display: {3}' -f $profileItems.Count, $profileNames.Count, $profileNotShown, $profileDisplay)
     } catch {
         Write-Result -Status (Get-FailureStatus $_) -Title 'Profile top-level names' -Source 'Get-ChildItem' -Scope 'current user profile, top level' -Detail (Get-FailureDetail $_)
     }
@@ -508,7 +538,9 @@ if ($null -ne $profileError) {
                     '[file] {0}; bytes={1}; modified={2}' -f $_.Name, $_.Length, $_.LastWriteTime.ToString('o')
                 }
             })
-            Write-Result -Status 'FOUND' -Title '.ssh names and metadata' -Source 'Get-ChildItem' -Scope 'current user .ssh, top level' -Lines $sshNames -Detail ('directory exists; entries: {0}; shown: {1}' -f $sshItems.Count, $sshNames.Count)
+            $sshNotShown = $sshItems.Count - $sshNames.Count
+            $sshDisplay = if ($sshNotShown -gt 0) { 'TRUNCATED' } else { 'COMPLETE' }
+            Write-Result -Status 'FOUND' -Title '.ssh names and metadata' -Source 'Get-ChildItem' -Scope 'current user .ssh, top level' -Lines $sshNames -Detail ('directory exists; entries: {0}; shown: {1}; not shown: {2}; display: {3}' -f $sshItems.Count, $sshNames.Count, $sshNotShown, $sshDisplay)
         }
     } catch {
         Write-Result -Status (Get-FailureStatus $_) -Title '.ssh names and metadata' -Source 'Get-ChildItem' -Scope 'current user .ssh, top level' -Detail (Get-FailureDetail $_)

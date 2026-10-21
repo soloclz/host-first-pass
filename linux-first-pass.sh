@@ -6,16 +6,27 @@ export LC_ALL=C
 
 MAX_LINES=500
 MAX_BYTES=131072
+MAX_STDERR_LINES=8
+MAX_STDERR_BYTES=8192
 SCAN_SECONDS=8
 ROOT_METADATA_SECONDS=30
 ROOT_CONTENT_SECONDS=90
 ROOT_FILE_BYTES=262144
 ENV_NAMES_ONLY=0
+FULL_HELPER=
 CURRENT_HOME=${HOME:-}
+umask 077
+PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/linux-first-pass.XXXXXXXX") || {
+  printf 'Cannot create temporary probe buffer\n' >&2
+  exit 1
+}
+trap 'rm -rf -- "$PROBE_DIR"' EXIT
 
 usage() {
   cat <<'USAGE'
 Usage: bash linux-first-pass.sh [--environment-names-only]
+       bash linux-first-pass.sh --full-helper NAME
+       bash linux-first-pass.sh --full-helper show_environment --environment-names-only
 Prints a local host snapshot and bounded file candidates to stdout.
 USAGE
 }
@@ -28,6 +39,30 @@ case $# in
       -h|--help) usage; exit 0 ;;
       *) usage >&2; exit 2 ;;
     esac
+    ;;
+  2)
+    if [[ $1 == --full-helper ]]; then
+      case $2 in
+        show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|\
+        show_defense_tools|show_common_tools|show_system_cron_entries|\
+        show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
+        show_ad_join_clues|show_dpkg_packages|show_apk_packages|show_current_ssh|\
+        show_history_paths|show_cron_paths) FULL_HELPER=$2 ;;
+        *) usage >&2; exit 2 ;;
+      esac
+    else
+      usage >&2
+      exit 2
+    fi
+    ;;
+  3)
+    if [[ $1 == --full-helper && $2 == show_environment && $3 == --environment-names-only ]]; then
+      FULL_HELPER=show_environment
+      ENV_NAMES_ONLY=1
+    else
+      usage >&2
+      exit 2
+    fi
     ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -45,7 +80,9 @@ safe_line() {
 run_probe() {
   local title=$1 source=$2 scope=$3
   shift 3
-  local output rc status detail line total=0 shown=0 bytes limited=0
+  local rc capture_rc stderr_capture_rc status detail line matched=0 shown=0 bytes=0
+  local stderr_total=0 stderr_shown=0 stderr_bytes=0
+  local -a pipeline_status=()
 
   if ! have "$1"; then
     printf '[UNAVAILABLE] %s | source: %s | scope: %s | command unavailable: %s\n' \
@@ -53,32 +90,72 @@ run_probe() {
     return
   fi
 
-  # Pipefail preserves a short-output query failure. The two heads also bound
-  # memory while capturing a noisy process, environment, or find probe.
-  output=$("$@" 2>&1 | head -n "$((MAX_LINES + 1))" | head -c "$((MAX_BYTES + 1))")
-  rc=$?
-  bytes=${#output}
-  if (( bytes > MAX_BYTES )); then
-    output=${output:0:MAX_BYTES}
-    limited=1
+  : > "$PROBE_DIR/stdout"
+  : > "$PROBE_DIR/stderr"
+  rm -f -- "$PROBE_DIR/meta"
+  # Drain the producer even after the display limit. Only complete records
+  # enter the bounded buffer; stderr never uses an output row.
+  "$@" 2>"$PROBE_DIR/stderr" | awk \
+    -v line_limit="$MAX_LINES" -v byte_limit="$MAX_BYTES" \
+    -v display="$PROBE_DIR/stdout" -v meta="$PROBE_DIR/meta" '
+      {
+        matched++
+        row_bytes = length($0) + 1
+        if (!truncated && shown < line_limit && bytes + row_bytes <= byte_limit) {
+          print $0 >> display
+          shown++
+          bytes += row_bytes
+        } else {
+          truncated = 1
+        }
+      }
+      END {
+        printf "%d %d %d\n", matched, shown, bytes > meta
+        close(display)
+        close(meta)
+      }
+    '
+  pipeline_status=("${PIPESTATUS[@]}")
+  rc=${pipeline_status[0]}
+  capture_rc=${pipeline_status[1]}
+  if [[ -f $PROBE_DIR/meta ]]; then
+    read -r matched shown bytes < "$PROBE_DIR/meta"
   fi
-  if [[ -n $output ]]; then
-    while IFS= read -r line || [[ -n $line ]]; do
-      ((total+=1))
-    done <<< "$output"
+  : > "$PROBE_DIR/stderr-display"
+  rm -f -- "$PROBE_DIR/stderr-meta"
+  awk -v line_limit="$MAX_STDERR_LINES" -v byte_limit="$MAX_STDERR_BYTES" \
+    -v display="$PROBE_DIR/stderr-display" -v meta="$PROBE_DIR/stderr-meta" '
+      {
+        total++
+        row_bytes = length($0) + 1
+        if (!truncated && shown < line_limit && bytes + row_bytes <= byte_limit) {
+          print $0 >> display
+          shown++
+          bytes += row_bytes
+        } else {
+          truncated = 1
+        }
+      }
+      END {
+        printf "%d %d %d\n", total, shown, bytes > meta
+        close(display)
+        close(meta)
+      }
+    ' "$PROBE_DIR/stderr"
+  stderr_capture_rc=$?
+  if [[ -f $PROBE_DIR/stderr-meta ]]; then
+    read -r stderr_total stderr_shown stderr_bytes < "$PROBE_DIR/stderr-meta"
   fi
-  if (( total > MAX_LINES )); then limited=1; fi
 
-  if (( limited || rc == 124 || rc == 137 || rc == 141 )); then
+  if (( capture_rc != 0 || stderr_capture_rc != 0 )); then
+    status=ERROR
+  elif (( rc == 124 || rc == 137 || rc == 141 )); then
     status=INCOMPLETE
   elif (( rc == 0 )); then
-    if [[ -n $output ]]; then status=FOUND; else status=NONE; fi
-  elif [[ $output == *'a password is required'* || $output == *'a terminal is required'* ]]; then
+    if (( matched > 0 )); then status=FOUND; else status=NONE; fi
+  elif grep -qiE 'a password is required|a terminal is required' "$PROBE_DIR/stderr"; then
     status=AUTH_REQUIRED
-  elif [[ $output == *'Permission denied'* || $output == *'permission denied'* ||
-          $output == *'Operation not permitted'* || $output == *'not allowed to run sudo'* ||
-          $output == *'is not in the sudoers file'* ||
-          $output == *'You need to be root'* ]]; then
+  elif grep -qiE 'permission denied|operation not permitted|not allowed to run sudo|is not in the sudoers file|you need to be root' "$PROBE_DIR/stderr"; then
     status=DENIED
   elif (( rc == 127 || rc == 4 )); then
     status=UNAVAILABLE
@@ -86,28 +163,125 @@ run_probe() {
     status=ERROR
   fi
 
-  detail="exit: $rc"
-  if (( limited )); then
-    detail="$detail; capture INCOMPLETE: first $MAX_LINES lines or $MAX_BYTES bytes; remainder unknown"
-  elif (( rc == 124 || rc == 137 )); then
-    detail="$detail; scan stopped at the stated time limit; query partial"
+  detail="exit=$rc; count-unit=stdout-lines"
+  if (( capture_rc != 0 )); then
+    detail="$detail; capture exit=$capture_rc"
+  fi
+  if (( stderr_capture_rc != 0 )); then
+    detail="$detail; stderr capture exit=$stderr_capture_rc"
+  fi
+  if (( rc == 0 && capture_rc == 0 && stderr_capture_rc == 0 )); then
+    detail="$detail; matched=$matched shown=$shown undisplayed=$((matched - shown))"
+  else
+    detail="$detail; observed=$matched shown=$shown undisplayed-observed=$((matched - shown)); unscanned=unknown"
+  fi
+  if (( matched > shown )); then
+    detail="$detail; display=TRUNCATED (${MAX_LINES} lines or ${MAX_BYTES} bytes per probe)"
+  fi
+  if (( stderr_total > 0 )); then
+    detail="$detail; stderr-lines=$stderr_total stderr-shown=$stderr_shown stderr-undisplayed=$((stderr_total - stderr_shown))"
+  fi
+  if (( rc == 124 || rc == 137 )); then
+    detail="$detail; time limit reached"
   elif (( rc == 141 )); then
-    detail="$detail; producer stopped before completion"
+    detail="$detail; producer ended before completion"
   fi
   printf '[%s] %s | source: %s | scope: %s | %s\n' \
     "$status" "$title" "$source" "$scope" "$detail"
 
-  if [[ -n $output ]]; then
+  while IFS= read -r line || [[ -n $line ]]; do
+    printf '  %s\n' "$(safe_line "$line")"
+  done < "$PROBE_DIR/stdout"
+  if (( stderr_total > 0 )); then
+    printf '  stderr (first %d lines or %d bytes):\n' "$MAX_STDERR_LINES" "$MAX_STDERR_BYTES"
     while IFS= read -r line || [[ -n $line ]]; do
-      if (( shown < MAX_LINES )); then
-        printf '  %s\n' "$(safe_line "$line")"
-        ((shown+=1))
+      printf '    %s\n' "$(safe_line "$line")"
+    done < "$PROBE_DIR/stderr-display"
+    if (( stderr_total > stderr_shown )); then
+      printf '    ... %d stderr lines undisplayed\n' "$((stderr_total - stderr_shown))"
+    fi
+  fi
+  if (( matched > shown || rc != 0 || capture_rc != 0 || stderr_capture_rc != 0 || stderr_total > stderr_shown )); then
+    show_followup "$@"
+  fi
+}
+
+show_followup() {
+  case $1 in
+    scan_root)
+      if build_root_scan "$2"; then
+        printf '  full-output command: umask 077; LC_ALL=C '
+        printf '%q ' find "${ROOT_SCAN_ARGS[@]}"
+        print_save_tail
+      else
+        printf '  full-output: README.md Linux full-output follow-up key=root:%s\n' "$2"
       fi
-    done <<< "$output"
-  fi
-  if [[ $status == INCOMPLETE ]]; then
-    printf '  ... partial result; see README manual follow-up examples and the selected topic in pentest notes\n'
-  fi
+      ;;
+    scan_paths)
+      if build_path_scan "$2" "$3" "$4"; then
+        printf '  full-output command: umask 077; LC_ALL=C '
+        printf '%q ' find "${PATH_SCAN_ARGS[@]}"
+        print_save_tail
+      else
+        printf '  full-output: README.md Linux full-output follow-up key=path:%s root=%q depth=%q\n' \
+          "$4" "$2" "$3"
+      fi
+      ;;
+    scan_capabilities)
+      if build_capability_roots; then
+        printf '  full-output command: umask 077; LC_ALL=C '
+        printf '%q ' getcap -r "${CAPABILITY_ROOTS[@]}"
+        print_save_tail
+      else
+        printf '  full-output: README.md Linux full-output follow-up key=scan_capabilities\n'
+      fi
+      ;;
+    scan_application_executables)
+      if build_application_roots; then
+        printf '  full-output command: umask 077; LC_ALL=C '
+        printf '%q ' find "${APPLICATION_ROOTS[@]}" -xdev -maxdepth 4 -type f -executable -ls
+        print_save_tail
+      else
+        printf '  full-output: README.md Linux full-output follow-up key=scan_application_executables\n'
+      fi
+      ;;
+    show_dpkg_packages)
+      printf '  full-output command: umask 077; set -o pipefail; { '
+      printf '%q ' dpkg-query -W '-f=${db:Status-Abbrev}\t${binary:Package}\t${Version}\n'
+      printf '| '
+      printf '%q ' awk -F '\t' 'substr($1, 2, 1) == "i" { print }'
+      printf '; } '
+      print_save_tail
+      ;;
+    show_*)
+      if [[ -f ${BASH_SOURCE[0]} ]]; then
+        printf '  full-output command: umask 077; '
+        printf '%q ' bash "${BASH_SOURCE[0]}" --full-helper "$1"
+        if [[ $1 == show_environment ]] && (( ENV_NAMES_ONLY )); then
+          printf '%q ' --environment-names-only
+        fi
+        print_save_tail
+      else
+        printf '  full-output: save linux-first-pass.sh, then run bash SCRIPT_PATH --full-helper %q\n' "$1"
+        printf '  save rerun stdout/stderr separately; see README.md Linux full-output follow-up key=%s\n' "$1"
+      fi
+      ;;
+    timeout)
+      shift 2
+      printf '  longer bounded rerun command: umask 077; '
+      printf '%q ' timeout 30s "$@"
+      print_save_tail
+      ;;
+    *)
+      printf '  full-output command: umask 077; '
+      printf '%q ' "$@"
+      print_save_tail
+      ;;
+  esac
+}
+
+print_save_tail() {
+  printf '%s\n' '> "$HOME/first-pass-full.txt" 2> "$HOME/first-pass-full.err"; rc=$?; printf "exit=%s\n" "$rc"; wc -l "$HOME/first-pass-full.txt"; less -S "$HOME/first-pass-full.txt"'
 }
 
 section() { printf '\n=== %s ===\n' "$1"; }
@@ -162,6 +336,68 @@ show_fstab() {
   ' /etc/fstab
 }
 
+PATH_SCAN_ARGS=()
+
+build_path_scan() {
+  local root=$1 depth=$2 kind=$3
+  PATH_SCAN_ARGS=("$root" -xdev -maxdepth "$depth" -mindepth 1)
+  case $kind in
+    hidden)
+      PATH_SCAN_ARGS+=(-name '.*' -ls)
+      ;;
+    temp)
+      PATH_SCAN_ARGS+=(-ls)
+      ;;
+    all-files)
+      PATH_SCAN_ARGS+=(-type f -ls)
+      ;;
+    config-names)
+      PATH_SCAN_ARGS+=(-type f
+        \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
+           -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
+           -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls)
+      ;;
+    config-content)
+      if ! have grep; then
+        printf 'grep unavailable\n' >&2
+        return 127
+      fi
+      PATH_SCAN_ARGS+=(-type f -size -1048576c -readable
+        \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
+           -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
+           -o -name '.env' -o -name 'config' -o -name 'credentials' \)
+        -exec bash -c '
+          pattern=$1
+          shift
+          failed=0
+          for path do
+            grep -IqiE "$pattern" -- "$path"
+            code=$?
+            if [ "$code" -eq 0 ]; then printf "%q\n" "$path"; fi
+            if [ "$code" -gt 1 ]; then
+              printf "grep read error: %s\n" "$path" >&2
+              failed=1
+            fi
+          done
+          exit "$failed"
+        ' bash 'pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key' '{}' +)
+      ;;
+    writable-dirs)
+      PATH_SCAN_ARGS+=(-type d -writable -executable -ls)
+      ;;
+    writable-files)
+      PATH_SCAN_ARGS+=(-type f -writable -ls)
+      ;;
+    suid-sgid)
+      PATH_SCAN_ARGS+=(-type f \( -perm -4000 -o -perm -2000 \) -ls)
+      ;;
+    *)
+      printf 'unknown scan kind: %s\n' "$kind" >&2
+      return 2
+      ;;
+  esac
+}
+
 scan_paths() {
   local root=$1 depth=$2 kind=$3
   if [[ ! -d $root ]]; then
@@ -172,138 +408,97 @@ scan_paths() {
     printf 'find or timeout unavailable\n' >&2
     return 127
   fi
-  case $kind in
-    hidden)
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 -name '.*' \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
-      ;;
-    temp)
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
-      ;;
-    all-files)
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 -type f \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
-      ;;
-    config-names)
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 -type f \
-        \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini' \
-           -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' \
-           -o -name '.env' -o -name 'config' -o -name 'credentials' \) \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
-      ;;
-    config-content)
-      if ! have grep; then
-        printf 'grep unavailable\n' >&2
-        return 127
-      fi
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 -type f -size -1024k -readable \
-        \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini' \
-           -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' \
-           -o -name '.env' -o -name 'config' -o -name 'credentials' \) \
-        -exec sh -c '
-          pattern=$1
-          shift
-          failed=0
-          for path do
-            grep -IilE "$pattern" -- "$path"
-            code=$?
-            if [ "$code" -gt 1 ]; then
-              printf "grep read error: %s\n" "$path" >&2
-              failed=1
-            fi
-          done
-          exit "$failed"
-        ' sh 'pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key' '{}' +
-      ;;
-    writable-dirs)
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 -type d -writable -executable \
-        -printf '%p | uid=%U gid=%G mode=%m\n'
-      ;;
-    writable-files)
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 -type f -writable \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
-      ;;
-    suid-sgid)
-      timeout "${SCAN_SECONDS}s" find "$root" -xdev -maxdepth "$depth" \
-        -mindepth 1 -type f \( -perm -4000 -o -perm -2000 \) \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
-      ;;
-    *)
-      printf 'unknown scan kind: %s\n' "$kind" >&2
-      return 2
-      ;;
-  esac
+  build_path_scan "$root" "$depth" "$kind" || return $?
+  timeout "${SCAN_SECONDS}s" find "${PATH_SCAN_ARGS[@]}"
 }
 
-scan_root() {
-  local kind=$1 seconds=$ROOT_METADATA_SECONDS
-  if ! have find || ! have timeout; then
-    printf 'find or timeout unavailable\n' >&2
-    return 127
-  fi
+ROOT_SCAN_ARGS=()
+ROOT_SCAN_SECONDS=$ROOT_METADATA_SECONDS
+
+build_root_scan() {
+  local kind=$1
+  ROOT_SCAN_ARGS=(/ -xdev -ignore_readdir_race)
+  ROOT_SCAN_SECONDS=$ROOT_METADATA_SECONDS
   case $kind in
     credential-content)
       if ! have grep; then
         printf 'grep unavailable\n' >&2
         return 127
       fi
-      seconds=$ROOT_CONTENT_SECONDS
-      # -size with c is byte-accurate; -readable limits the content query to
-      # files this identity can open. GNU find still reports denied directories.
-      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
-        -type f -size "-${ROOT_FILE_BYTES}c" -readable \
-        -exec sh -c '
-          grep -IilE "pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key" -- "$@"
-          code=$?
-          [ "$code" -eq 0 ] || [ "$code" -eq 1 ]
-        ' sh '{}' +
+      ROOT_SCAN_SECONDS=$ROOT_CONTENT_SECONDS
+      ROOT_SCAN_ARGS+=(-type f -size "-${ROOT_FILE_BYTES}c" -readable
+        -exec bash -c '
+          failed=0
+          for path do
+            grep -IqiE "pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key" -- "$path"
+            code=$?
+            if [ "$code" -eq 0 ]; then printf "%q\n" "$path"; fi
+            if [ "$code" -gt 1 ]; then
+              printf "grep read error: %s\n" "$path" >&2
+              failed=1
+            fi
+          done
+          exit "$failed"
+        ' bash '{}' +)
       ;;
     shell-scripts)
-      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
-        -mindepth 1 -type f \
-        \( -iname '*.sh' -o -iname '*.bash' -o -iname '*.zsh' -o -iname '*.ksh' \) \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f
+        \( -iname '*.sh' -o -iname '*.bash' -o -iname '*.zsh' -o -iname '*.ksh' \) -ls)
       ;;
     other-scripts)
-      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
-        -mindepth 1 -type f \
-        \( -iname '*.py' -o -iname '*.pl' -o -iname '*.rb' \
-           -o -iname '*.php' -o -iname '*.lua' -o -iname '*.js' \
-           -o -iname '*.ps1' \) \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f
+        \( -iname '*.py' -o -iname '*.pl' -o -iname '*.rb'
+           -o -iname '*.php' -o -iname '*.lua' -o -iname '*.js'
+           -o -iname '*.ps1' \) -ls)
       ;;
     candidate-names)
-      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
-        -mindepth 1 -type f \
-        \( -iname '*password*' -o -iname '*secret*' \
-           -o -iname '*credential*' -o -iname '*token*' -o -iname '*note*' \
-           -o -iname '*.env' -o -iname '*.bak' -o -iname '*.old' \) \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f
+        \( -iname '*password*' -o -iname '*secret*'
+           -o -iname '*credential*' -o -iname '*token*' -o -iname '*note*'
+           -o -iname '*.env' -o -iname '*.bak' -o -iname '*.old' \) -ls)
+      ;;
+    config-names)
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f
+        \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
+           -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
+           -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls)
+      ;;
+    history-names)
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f
+        \( -iname '*_hist' -o -iname '*_history' \) -ls)
+      ;;
+    backup-log-names)
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f
+        \( -iname '*backup*' -o -iname '*.bak' -o -iname '*.old'
+           -o -iname '*.log' -o -iname '*.log.*' -o -iname '*.sql'
+           -o -iname '*.sql.gz' -o -iname '*.tgz'
+           -o -iname '*.tar.gz' -o -iname '*.zip' \) -ls)
+      ;;
+    recent-files)
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f -mtime -7 -ls)
       ;;
     writable)
-      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
-        -mindepth 1 \
-        \( \( -type d -writable -executable \) -o \( -type f -writable \) \) \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ROOT_SCAN_ARGS+=(-mindepth 1
+        \( \( -type d -writable -executable \) -o \( -type f -writable \) \) -ls)
       ;;
     suid-sgid)
-      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
-        -mindepth 1 -type f \( -perm -4000 -o -perm -2000 \) \
-        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ROOT_SCAN_ARGS+=(-mindepth 1 -type f
+        \( -perm -4000 -o -perm -2000 \) -ls)
       ;;
     *)
       printf 'unknown root scan kind: %s\n' "$kind" >&2
       return 2
       ;;
   esac
+}
+
+scan_root() {
+  if ! have find || ! have timeout; then
+    printf 'find or timeout unavailable\n' >&2
+    return 127
+  fi
+  build_root_scan "$1" || return $?
+  timeout -k 2s "${ROOT_SCAN_SECONDS}s" find "${ROOT_SCAN_ARGS[@]}"
 }
 
 show_defense_tools() {
@@ -316,6 +511,117 @@ show_defense_tools() {
       printf '%s absent\n' "$tool"
     fi
   done
+}
+
+show_common_tools() {
+  local tool path
+  for tool in nc ncat netcat socat python3 python2 perl ruby nmap tcpdump \
+              gcc cc make curl wget openssl ssh scp rsync jq strace file; do
+    if have "$tool"; then
+      path=$(command -v "$tool")
+      printf '%s present path=%q\n' "$tool" "$path"
+    else
+      printf '%s absent\n' "$tool"
+    fi
+  done
+}
+
+show_system_cron_entries() {
+  local path failed=0
+  for path in /etc/crontab /etc/cron.d/*; do
+    [[ -f $path ]] || continue
+    if [[ -r $path ]]; then
+      awk -v label="$path" 'NF && $1 !~ /^#/ {
+        printf "%s:%d:%s\n", label, FNR, $0
+      }' "$path" || failed=1
+    else
+      printf 'Permission denied: %s\n' "$path" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+show_cron_directory_entries() {
+  local root found=0 failed=0
+  for root in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly \
+              /etc/cron.monthly /etc/cron.d /var/spool/cron /var/spool/cron/crontabs; do
+    [[ -d $root ]] || continue
+    found=1
+    find "$root" -xdev -mindepth 1 -maxdepth 1 -ls || failed=1
+  done
+  (( found )) || return 4
+  return "$failed"
+}
+
+show_current_crontab() {
+  if ! have crontab; then
+    printf 'crontab unavailable\n' >&2
+    return 127
+  fi
+  local rc
+  crontab -l 2>"$PROBE_DIR/crontab.stderr"
+  rc=$?
+  if (( rc == 0 )); then return 0; fi
+  if grep -q '^no crontab for ' "$PROBE_DIR/crontab.stderr"; then return 0; fi
+  cat "$PROBE_DIR/crontab.stderr" >&2
+  return "$rc"
+}
+
+show_password_policy_clues() {
+  local path failed=0
+  for path in /etc/login.defs /etc/security/pwquality.conf \
+              /etc/security/pwhistory.conf /etc/pam.d/common-password \
+              /etc/pam.d/system-auth /etc/pam.d/password-auth; do
+    [[ -e $path ]] || continue
+    if [[ -r $path ]]; then
+      awk 'NF && $1 !~ /^#/ {
+        printf "%s:%d:%s\n", FILENAME, FNR, $0
+      }' "$path" || failed=1
+    else
+      printf 'Permission denied: %s\n' "$path" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+show_ad_join_clues() {
+  local path failed=0 realm_rc=0
+  if have realm; then
+    timeout "${SCAN_SECONDS}s" realm list || realm_rc=$?
+  fi
+  for path in /etc/sssd/sssd.conf /etc/krb5.conf /etc/realmd.conf; do
+    [[ -e $path || -L $path ]] || continue
+    ls -ldb -- "$path" || failed=1
+  done
+  if (( realm_rc == 124 || realm_rc == 137 )); then return "$realm_rc"; fi
+  if (( realm_rc != 0 )); then failed=1; fi
+  return "$failed"
+}
+
+APPLICATION_ROOTS=()
+build_application_roots() {
+  local root
+  APPLICATION_ROOTS=()
+  for root in /usr/local/bin /usr/local/sbin /opt /srv /app /home \
+              /tmp /var/tmp /dev/shm; do
+    [[ -d $root ]] && APPLICATION_ROOTS+=("$root")
+  done
+  if (( ${#APPLICATION_ROOTS[@]} == 0 )); then
+    printf 'no application scan roots exist\n' >&2
+    return 4
+  fi
+}
+
+scan_application_executables() {
+  if ! have find || ! have timeout; then
+    printf 'find or timeout unavailable\n' >&2
+    return 127
+  fi
+  build_application_roots || return $?
+  timeout -k 2s "${ROOT_METADATA_SECONDS}s" find "${APPLICATION_ROOTS[@]}" \
+    -xdev -maxdepth 4 -type f -executable -ls
 }
 
 show_dpkg_packages() {
@@ -377,22 +683,32 @@ show_cron_paths() {
   return "$failed"
 }
 
+CAPABILITY_ROOTS=()
+build_capability_roots() {
+  local root
+  CAPABILITY_ROOTS=()
+  for root in /usr/bin /usr/sbin /usr/local/bin /opt /srv /app; do
+    [[ -d $root ]] && CAPABILITY_ROOTS+=("$root")
+  done
+  if (( ${#CAPABILITY_ROOTS[@]} == 0 )); then
+    printf 'no capability scan roots exist\n' >&2
+    return 4
+  fi
+}
+
 scan_capabilities() {
   if ! have getcap || ! have timeout; then
     printf 'getcap or timeout unavailable\n' >&2
     return 127
   fi
-  local root
-  local -a roots=()
-  for root in /usr/bin /usr/sbin /usr/local/bin /opt /srv /app; do
-    [[ -d $root ]] && roots+=("$root")
-  done
-  if (( ${#roots[@]} == 0 )); then
-    printf 'no capability scan roots exist\n' >&2
-    return 4
-  fi
-  timeout "${SCAN_SECONDS}s" getcap -r "${roots[@]}"
+  build_capability_roots || return $?
+  timeout "${SCAN_SECONDS}s" getcap -r "${CAPABILITY_ROOTS[@]}"
 }
+
+if [[ -n $FULL_HELPER ]]; then
+  "$FULL_HELPER"
+  exit $?
+fi
 
 printf 'Linux first pass\n'
 printf 'Time: %s | Host: %s | Identity: %s\n' \
@@ -400,7 +716,7 @@ printf 'Time: %s | Host: %s | Identity: %s\n' \
   "$(hostname 2>/dev/null || printf unavailable)" \
   "$(id -un 2>/dev/null || printf unavailable)"
 printf 'Scope: local Linux host, current identity, root filesystem starting at /, and named bounded file roots.\n'
-printf 'Named find scans: max depth 2-4, one filesystem per root, %ss per scan. Capture cap per probe: %d lines or %d bytes.\n' \
+printf 'Named find scans: max depth 2-4, one filesystem per root, %ss per scan. Display cap per probe: %d lines or %d bytes.\n' \
   "$SCAN_SECONDS" "$MAX_LINES" "$MAX_BYTES"
 printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; content files < %d bytes.\n' \
   "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS" "$ROOT_FILE_BYTES"
@@ -426,6 +742,9 @@ run_probe 'Arch installed packages' 'pacman -Q' 'local pacman database' pacman -
 run_probe 'Alpine installed packages' 'apk v2 info -v / v3 list --installed --manifest' \
   'local apk database; command selected by apk-tools major version' show_apk_packages
 run_probe 'Sudo rules' 'sudo -n -l' 'current identity; no password prompt' env LC_ALL=C sudo -n -l
+run_probe 'Sudo version' 'sudo -V' 'local sudo version and plugin information' timeout "${SCAN_SECONDS}s" sudo -V
+run_probe 'Common tool presence' 'command -v' \
+  'common transfer, interpreter, build, discovery and trace commands; PATH lookup only' show_common_tools
 
 section 'Processes and local defenses'
 run_probe 'Running processes' 'ps -eo user,pid,ppid,lstart,cmd --forest -ww' \
@@ -436,9 +755,19 @@ run_probe 'TTY activity' 'w' 'visible utmp users and current commands' w
 run_probe 'Systemd login sessions' 'loginctl list-sessions' \
   'sessions visible through systemd-logind if available' \
   loginctl list-sessions --no-pager
+run_probe 'Last login per account' 'lastlog' 'local lastlog database; account login timestamps' \
+  timeout "${SCAN_SECONDS}s" lastlog
+run_probe 'Recent login history' 'last -a' 'local wtmp database; all available records' \
+  timeout "${SCAN_SECONDS}s" last -a
 run_probe 'Running services' 'systemctl list-units' \
   'active systemd service units if systemd is available' \
   systemctl list-units --type=service --state=running --no-legend --no-pager
+run_probe 'Systemd service and socket unit files' 'systemctl list-unit-files' \
+  'installed service and socket unit files, including disabled and static states' \
+  timeout "${SCAN_SECONDS}s" systemctl list-unit-files --type=service,socket --no-legend --no-pager
+run_probe 'Systemd sockets' 'systemctl list-sockets --all' \
+  'loaded systemd socket units, active and inactive when systemd is available' \
+  timeout "${SCAN_SECONDS}s" systemctl list-sockets --all --no-legend --no-pager
 run_probe 'SELinux state' 'getenforce' 'local SELinux mode if tool is installed' getenforce
 run_probe 'AppArmor state' 'aa-status' 'local AppArmor status if tool is installed' aa-status
 run_probe 'UFW state' 'ufw status' 'local firewall status if tool is installed' ufw status
@@ -449,6 +778,12 @@ run_probe 'Systemd timers' 'systemctl list-timers --all' \
   systemctl list-timers --all --no-legend --no-pager
 run_probe 'Cron path metadata' 'ls -ld /etc/cron*' \
   'known local cron paths; names and metadata only' show_cron_paths
+run_probe 'System cron entries' '/etc/crontab and /etc/cron.d' \
+  'readable system cron schedule lines; comments omitted' show_system_cron_entries
+run_probe 'Cron directory entries' 'find cron roots -maxdepth 1 -ls' \
+  'existing /etc/cron.* and /var/spool/cron directories; immediate entry metadata' show_cron_directory_entries
+run_probe 'Current crontab' 'crontab -l' \
+  'current identity; own scheduled jobs when crontab is available' show_current_crontab
 
 section 'Container and namespace context'
 run_probe 'PID 1 cgroup' '/proc/1/cgroup' 'PID 1 in current PID namespace' cat /proc/1/cgroup
@@ -461,6 +796,10 @@ run_probe 'Local passwd accounts' '/etc/passwd (selected fields)' \
   'local passwd file; hash values suppressed; NSS users may be elsewhere' show_passwd_accounts
 run_probe 'Local groups' '/etc/group (selected fields)' \
   'local group file; NSS groups may be elsewhere' show_groups
+run_probe 'Password policy file clues' 'login.defs, security and PAM files' \
+  'noncomment lines of common local policy files; effective PAM path requires follow-up' show_password_policy_clues
+run_probe 'AD join clues' 'realm list and identity configuration paths' \
+  'realm list when installed, plus metadata for sssd.conf, krb5.conf and realmd.conf' show_ad_join_clues
 run_probe 'Home root' 'ls -la /home' 'top level of /home' ls -la /home
 if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
   run_probe 'Current home' 'ls -la' "top level of $HOME" ls -la "$HOME"
@@ -476,15 +815,21 @@ run_probe 'Routes' 'ip route show' 'current network namespace routes' ip route s
 run_probe 'Neighbor cache' 'ip neigh show' 'current network namespace cache' ip neigh show
 run_probe 'TCP listeners and UDP endpoints' 'ss -lntup' \
   'current network namespace; process metadata visible to current user' ss -lntup
+run_probe 'TCP connections' 'ss -tanp' \
+  'current network namespace; all TCP states including established connections' ss -tanp
+run_probe 'Unix sockets' 'ss -xap' \
+  'current network namespace; Unix socket endpoints and visible process metadata' ss -xap
 run_probe 'Resolver' '/etc/resolv.conf (selected directives)' \
   'nameserver/search/domain directives only' show_resolver
+run_probe 'Hosts file' '/etc/hosts' 'local static host mappings and comments' cat /etc/hosts
 
 section 'Storage and mounts'
 run_probe 'Block devices' 'lsblk' 'local block devices and mount points' \
   lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT
 run_probe 'Current mounts' 'findmnt' 'current mount namespace; target/source/type only' \
   findmnt -rno TARGET,SOURCE,FSTYPE
-run_probe 'Filesystem capacity' 'df -h' 'mounted filesystems' df -h
+run_probe 'Filesystem capacity' 'df -h' 'mounted filesystems; 8s limit for unresponsive mounts' \
+  timeout "${SCAN_SECONDS}s" df -h
 run_probe 'Static mount entries' '/etc/fstab (selected fields)' \
   'noncomment fstab entries; options values suppressed' show_fstab
 run_probe 'Printers' 'lpstat -p -d' 'local printer status if tool is installed' lpstat -p -d
@@ -502,6 +847,21 @@ run_probe 'Credential-like text markers from /' 'find / -xdev + grep -IilE' \
 run_probe 'Interesting filenames from /' 'find / -xdev -type f' \
   "/ on root filesystem; selected name patterns; metadata only; ${ROOT_METADATA_SECONDS}s" \
   scan_root candidate-names
+run_probe 'Config file candidates from /' 'find / -xdev -type f (config names)' \
+  "/ on root filesystem; .conf/.config/.ini/.yaml/.yml/.json/.env and fixed config names; ${ROOT_METADATA_SECONDS}s" \
+  scan_root config-names
+run_probe 'History file candidates from /' 'find / -xdev -type f (history names)' \
+  "/ on root filesystem; *_hist/*_history names and metadata; ${ROOT_METADATA_SECONDS}s" \
+  scan_root history-names
+run_probe 'Backup and log filename candidates from /' 'find / -xdev -type f (backup/log names)' \
+  "/ on root filesystem; backup, .bak/.old, log and SQL names and metadata; ${ROOT_METADATA_SECONDS}s" \
+  scan_root backup-log-names
+run_probe 'Executable candidates in application roots' 'find custom roots -executable -ls' \
+  "/usr/local/bin,/usr/local/sbin,/opt,/srv,/app,/home and temporary roots; depth<=4; ${ROOT_METADATA_SECONDS}s" \
+  scan_application_executables
+run_probe 'Recently modified file candidates from /' 'find / -xdev -mtime -7 -ls' \
+  "/ on root filesystem; regular files modified within 7 days; one metadata snapshot; ${ROOT_METADATA_SECONDS}s" \
+  scan_root recent-files
 if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
   run_probe 'Hidden paths in current home' 'find hidden names' \
     "$HOME; depth<=4; same filesystem; ${SCAN_SECONDS}s" \
@@ -526,7 +886,7 @@ for root in /tmp /var/tmp /dev/shm; do
     scan_paths "$root" 2 temp
 done
 
-for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups /var/lib /mnt /media /root; do
+for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups /var/lib /run /mnt /media /root; do
   [[ -n $root ]] || continue
   depth=3
   [[ -n $CURRENT_HOME && $root == "$CURRENT_HOME" ]] && depth=4
@@ -565,4 +925,4 @@ run_probe 'File capabilities' 'getcap -r' \
   "existing /usr/bin /usr/sbin /usr/local/bin /opt /srv /app; ${SCAN_SECONDS}s" \
   scan_capabilities
 
-printf '\nCandidate paths are leads. Read a selected file to verify content and context. For an INCOMPLETE probe, use the focused commands in README and the selected topic in pentest notes.\n'
+printf '\nCandidate paths are leads. Read a selected file to verify content and context. For undisplayed rows or incomplete scans, use the printed full-output follow-up.\n'
