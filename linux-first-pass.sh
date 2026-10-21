@@ -250,7 +250,7 @@ scan_root() {
     return 127
   fi
   case $kind in
-    flag-content|credential-content)
+    credential-content)
       if ! have grep; then
         printf 'grep unavailable\n' >&2
         return 127
@@ -261,21 +261,29 @@ scan_root() {
       timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
         -type f -size "-${ROOT_FILE_BYTES}c" -readable \
         -exec sh -c '
-          kind=$1
-          shift
-          if [ "$kind" = flag-content ]; then
-            grep -IilF -e "HTB{" -e "flag{" -- "$@"
-          else
-            grep -IilE "pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key" -- "$@"
-          fi
+          grep -IilE "pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key" -- "$@"
           code=$?
           [ "$code" -eq 0 ] || [ "$code" -eq 1 ]
-        ' sh "$kind" '{}' +
+        ' sh '{}' +
+      ;;
+    shell-scripts)
+      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
+        -mindepth 1 -type f \
+        \( -iname '*.sh' -o -iname '*.bash' -o -iname '*.zsh' -o -iname '*.ksh' \) \
+        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
+      ;;
+    other-scripts)
+      timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
+        -mindepth 1 -type f \
+        \( -iname '*.py' -o -iname '*.pl' -o -iname '*.rb' \
+           -o -iname '*.php' -o -iname '*.lua' -o -iname '*.js' \
+           -o -iname '*.ps1' \) \
+        -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
       ;;
     candidate-names)
       timeout -k 2s "${seconds}s" find / -xdev -ignore_readdir_race \
         -mindepth 1 -type f \
-        \( -iname '*flag*' -o -iname '*password*' -o -iname '*secret*' \
+        \( -iname '*password*' -o -iname '*secret*' \
            -o -iname '*credential*' -o -iname '*token*' -o -iname '*note*' \
            -o -iname '*.env' -o -iname '*.bak' -o -iname '*.old' \) \
         -printf '%p | uid=%U gid=%G mode=%m size=%s\n'
@@ -482,9 +490,12 @@ run_probe 'Static mount entries' '/etc/fstab (selected fields)' \
 run_probe 'Printers' 'lpstat -p -d' 'local printer status if tool is installed' lpstat -p -d
 
 section 'Interesting file candidates'
-run_probe 'Flag-like text markers from /' 'find / -xdev + grep -IilF' \
-  "/ on root filesystem; readable regular files <${ROOT_FILE_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
-  scan_root flag-content
+run_probe 'Shell script candidates from /' 'find / -xdev -type f (shell script extensions)' \
+  "/ on root filesystem; .sh/.bash/.zsh/.ksh paths and metadata; ${ROOT_METADATA_SECONDS}s" \
+  scan_root shell-scripts
+run_probe 'Other script candidates from /' 'find / -xdev -type f (script extensions)' \
+  "/ on root filesystem; .py/.pl/.rb/.php/.lua/.js/.ps1 paths and metadata; ${ROOT_METADATA_SECONDS}s" \
+  scan_root other-scripts
 run_probe 'Credential-like text markers from /' 'find / -xdev + grep -IilE' \
   "/ on root filesystem; readable regular files <${ROOT_FILE_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
   scan_root credential-content
