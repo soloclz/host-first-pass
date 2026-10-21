@@ -113,10 +113,10 @@ function Invoke-NativeRead {
 
     # Native stderr is captured as text. The exit code, not output text, decides success.
     $ErrorActionPreference = 'Continue'
-    $LASTEXITCODE = $null
+    # Native commands update the global automatic variable; do not shadow it locally.
     try {
         $lines = @(& $Name @Arguments 2>&1 | ForEach-Object { [string]$_ })
-        $exitCode = $LASTEXITCODE
+        $exitCode = $global:LASTEXITCODE
     } catch {
         return [pscustomobject]@{
             Status = (Get-FailureStatus $_); Lines = @(); Detail = (Get-FailureDetail $_)
@@ -134,7 +134,7 @@ function Invoke-NativeRead {
         $status = if ($denied) { 'DENIED' } else { 'ERROR' }
         $detail = "exit code: $exitCode"
         if ($lines.Count -gt 0) {
-            $message = Format-SafeText $lines[0]
+            $message = Format-SafeText $lines[-1]
             if ($message.Length -gt 160) { $message = $message.Substring(0, 160) + '...' }
             if ($message) { $detail += "; message: $message" }
         }
@@ -392,7 +392,7 @@ if ($null -ne $profileError) {
     Write-Result -Status 'NOT_RUN' -Title 'Profile top-level names' -Source 'Get-ChildItem' -Scope 'current user profile, top level' -Detail 'profile path unavailable'
     Write-Result -Status 'NOT_RUN' -Title '.ssh names and metadata' -Source 'Get-ChildItem' -Scope 'current user .ssh, top level' -Detail 'profile path unavailable'
 } elseif ([string]::IsNullOrWhiteSpace($profilePath)) {
-    Write-Result -Status 'ERROR' -Title 'User profile' -Source 'Environment.SpecialFolder.UserProfile' -Scope 'current user' -Detail 'profile path unavailable'
+    Write-Result -Status 'NONE' -Title 'User profile' -Source 'Environment.SpecialFolder.UserProfile' -Scope 'current user' -Detail 'GetFolderPath returned no profile path'
     Write-Result -Status 'NOT_RUN' -Title 'Profile top-level names' -Source 'Get-ChildItem' -Scope 'current user profile, top level' -Detail 'profile path unavailable'
     Write-Result -Status 'NOT_RUN' -Title '.ssh names and metadata' -Source 'Get-ChildItem' -Scope 'current user .ssh, top level' -Detail 'profile path unavailable'
 } else {
