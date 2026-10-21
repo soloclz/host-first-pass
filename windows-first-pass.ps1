@@ -3,13 +3,13 @@
 .SYNOPSIS
     Fixed, read-only first pass for a new Windows host.
 .DESCRIPTION
-    Prints the current token, OS build and QFE records, UAC policy, running process
-    names, PIDs, session numbers and reported accounts, logon sessions, current
-    logon session Kerberos tickets, local network endpoints and related process
-    and service metadata, plus a few current-user credential-source
-    clues. By default, also prints all current-process environment variable
-    names and values. No recursive file searches, network calls, or files are
-    produced by this script.
+    Prints the current token, OS build and QFE records, UAC and Windows Installer
+    policy, running process names, PIDs, session numbers and reported accounts,
+    logon sessions, current logon session Kerberos tickets, local network
+    endpoints and related process and service metadata, plus a few current-user
+    credential-source clues. By default, also prints all current-process
+    environment variable names and values. No recursive file searches, network
+    calls, or files are produced by this script.
 .PARAMETER EnvironmentNamesOnly
     Print all current-process environment variable names without their values.
 #>
@@ -56,7 +56,7 @@ function Write-Section {
 
 function Write-Result {
     param(
-        [ValidateSet('FOUND', 'NONE', 'QUERY_OK', 'DENIED', 'ERROR', 'UNAVAILABLE', 'NOT_RUN')]
+        [ValidateSet('FOUND', 'CANDIDATE', 'NONE', 'QUERY_OK', 'DENIED', 'ERROR', 'UNAVAILABLE', 'NOT_RUN')]
         [string]$Status,
         [string]$Title,
         [string]$Source,
@@ -292,6 +292,55 @@ foreach ($name in @('EnableLUA', 'ConsentPromptBehaviorAdmin')) {
         Write-Result -Status (Get-FailureStatus $_) -Title $name -Source $uacPolicyPath -Scope 'local host' -Detail (Get-FailureDetail $_)
     }
 }
+
+Write-Section 'Windows Installer policy'
+$installerPolicy = @{}
+foreach ($hive in @('HKCU', 'HKLM')) {
+    $path = '{0}:\SOFTWARE\Policies\Microsoft\Windows\Installer' -f $hive
+    $scope = if ($hive -eq 'HKCU') { 'current user' } else { 'local machine' }
+    try {
+        $key = Get-Item -LiteralPath $path -ErrorAction Stop
+        if ($key.GetValueNames() -notcontains 'AlwaysInstallElevated') {
+            $installerPolicy[$hive] = 'absent'
+            Write-Result -Status 'NONE' -Title 'AlwaysInstallElevated' -Source $path -Scope $scope -Detail 'value absent'
+            continue
+        }
+
+        $kind = $key.GetValueKind('AlwaysInstallElevated')
+        $value = $key.GetValue('AlwaysInstallElevated', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $isEnabled = ($kind -eq [Microsoft.Win32.RegistryValueKind]::DWord -and $value -eq 1)
+        $installerPolicy[$hive] = if ($isEnabled) { 'REG_DWORD 1' } else { '{0} {1}' -f $kind, $value }
+        Write-Result -Status 'FOUND' -Title 'AlwaysInstallElevated' -Source $path -Scope $scope -Lines @(('type={0}; value={1}' -f $kind, $value))
+    } catch {
+        if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+            $installerPolicy[$hive] = 'absent'
+            Write-Result -Status 'NONE' -Title 'AlwaysInstallElevated' -Source $path -Scope $scope -Detail 'key absent'
+        } else {
+            $status = Get-FailureStatus $_
+            $installerPolicy[$hive] = $status
+            Write-Result -Status $status -Title 'AlwaysInstallElevated' -Source $path -Scope $scope -Detail (Get-FailureDetail $_)
+        }
+    }
+}
+
+$installerSummary = 'HKCU={0}; HKLM={1}' -f $installerPolicy['HKCU'], $installerPolicy['HKLM']
+if ($installerPolicy['HKCU'] -eq 'REG_DWORD 1' -and $installerPolicy['HKLM'] -eq 'REG_DWORD 1') {
+    $installerStatus = 'FOUND'
+    $installerDetail = 'both policy values are enabled; verify the token of any process launched by the MSI'
+} elseif ($installerPolicy['HKLM'] -eq 'REG_DWORD 1' -and $installerPolicy['HKCU'] -notin @('DENIED', 'ERROR')) {
+    $installerStatus = 'CANDIDATE'
+    $installerDetail = 'HKLM is enabled; set the current-user HKCU value to REG_DWORD 1 and recheck'
+} elseif ($installerPolicy['HKLM'] -notin @('REG_DWORD 1', 'DENIED', 'ERROR')) {
+    $installerStatus = 'NONE'
+    $installerDetail = 'HKLM is not REG_DWORD 1; changing HKCU alone cannot enable this policy'
+} elseif ($installerPolicy.Values -contains 'DENIED') {
+    $installerStatus = 'DENIED'
+    $installerDetail = 'a registry read was denied; policy condition is uncertain'
+} else {
+    $installerStatus = 'ERROR'
+    $installerDetail = 'a registry read failed; policy condition is uncertain'
+}
+Write-Result -Status $installerStatus -Title 'Elevated MSI policy condition' -Source 'AlwaysInstallElevated' -Scope 'current user on local host' -Lines @($installerSummary) -Detail $installerDetail
 
 Write-Section 'Running processes'
 $tasklistSource = 'tasklist /v /fo csv /nh'
