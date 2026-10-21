@@ -4,9 +4,9 @@
     Fixed, read-only first pass for a new Windows host.
 .DESCRIPTION
     Prints the current token, OS build and QFE records, UAC policy, running process
-    names and PIDs, logon sessions, current logon session Kerberos tickets,
-    local network endpoints
-    and their process/service owners, plus a few current-user credential-source
+    names, PIDs, session numbers and reported accounts, logon sessions, current
+    logon session Kerberos tickets, local network endpoints and related process
+    and service metadata, plus a few current-user credential-source
     clues. By default, also prints all current-process environment variable
     names and values. No recursive file searches, network calls, or files are
     produced by this script.
@@ -162,7 +162,7 @@ function Format-Endpoint {
         '(metadata unavailable)'
     } elseif ($Processes.ContainsKey($endpointProcessId)) {
         $process = $Processes[$endpointProcessId]
-        $path = if ($process.ExecutablePath) { [string]$process.ExecutablePath } else { '(path unavailable)' }
+        $path = if ($process.ExecutablePath) { [string]$process.ExecutablePath } else { '(not reported)' }
         '{0}; path={1}' -f $process.Name, $path
     } else {
         '(no matching process at query time)'
@@ -294,25 +294,31 @@ foreach ($name in @('EnableLUA', 'ConsentPromptBehaviorAdmin')) {
 }
 
 Write-Section 'Running processes'
-$tasklist = Invoke-NativeRead -Name 'tasklist.exe' -Arguments @('/fo', 'csv', '/nh')
+$tasklistSource = 'tasklist /v /fo csv /nh'
+$tasklist = Invoke-NativeRead -Name 'tasklist.exe' -Arguments @('/v', '/fo', 'csv', '/nh')
 if ($tasklist.Status -notin @('FOUND', 'NONE')) {
-    Write-Result -Status $tasklist.Status -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Detail $tasklist.Detail
+    Write-Result -Status $tasklist.Status -Title 'Process names, PIDs and accounts' -Source $tasklistSource -Scope 'local host' -Detail $tasklist.Detail
 } elseif ($tasklist.Status -eq 'NONE') {
-    Write-Result -Status 'NONE' -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Detail 'no rows returned'
+    Write-Result -Status 'NONE' -Title 'Process names, PIDs and accounts' -Source $tasklistSource -Scope 'local host' -Detail 'no rows returned'
 } else {
     try {
-        $taskRows = @($tasklist.Lines | ConvertFrom-Csv -Header @('ImageName', 'PID', 'SessionName', 'SessionNumber', 'MemoryUsage') -ErrorAction Stop)
+        $taskRows = @($tasklist.Lines | ConvertFrom-Csv -Header @('ImageName', 'PID', 'SessionName', 'SessionNumber', 'MemoryUsage', 'Status', 'UserName', 'CPUTime', 'WindowTitle') -ErrorAction Stop)
         if ($taskRows.Count -ne $tasklist.Lines.Count) { throw 'Unexpected tasklist CSV row count.' }
         $runningProcessLines = @($taskRows | ForEach-Object {
             $pidText = ([string]$_.PID).Trim()
             if ([string]::IsNullOrWhiteSpace($_.ImageName) -or $pidText -notmatch '^\d+$') {
                 throw 'Unexpected tasklist CSV fields.'
             }
-            'PID={0} name={1}' -f $pidText, $_.ImageName
+            $account = if ([string]::IsNullOrWhiteSpace($_.UserName) -or $_.UserName -eq 'N/A') { '(not reported)' } else { [string]$_.UserName }
+            $session = if ([string]::IsNullOrWhiteSpace($_.SessionNumber)) { '(not reported)' } else { [string]$_.SessionNumber }
+            'PID={0} name={1} session={2} account={3}' -f $pidText, $_.ImageName, $session, $account
         })
-        Write-Result -Status 'FOUND' -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Lines $runningProcessLines -Detail ('processes: {0}' -f $runningProcessLines.Count)
+        $accountsReported = @($taskRows | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_.UserName) -and $_.UserName -ne 'N/A'
+        }).Count
+        Write-Result -Status 'FOUND' -Title 'Process names, PIDs and accounts' -Source $tasklistSource -Scope 'local host' -Lines $runningProcessLines -Detail ('processes: {0}; accounts reported: {1}' -f $runningProcessLines.Count, $accountsReported)
     } catch {
-        Write-Result -Status 'ERROR' -Title 'Process names and PIDs' -Source 'tasklist /fo csv /nh' -Scope 'local host' -Detail 'unexpected tasklist CSV; no process rows shown'
+        Write-Result -Status 'ERROR' -Title 'Process names, PIDs and accounts' -Source $tasklistSource -Scope 'local host' -Detail 'unexpected tasklist CSV; no process rows shown'
     }
 }
 
@@ -324,7 +330,7 @@ Write-Section 'Kerberos tickets'
 $tickets = Invoke-NativeRead -Name 'klist.exe' -SuccessStatus 'QUERY_OK'
 Write-Result -Status $tickets.Status -Title 'Cached tickets' -Source 'klist' -Scope 'current logon session' -Lines $tickets.Lines -Detail $tickets.Detail
 
-Write-Section 'Network endpoints and owners'
+Write-Section 'Network endpoints and PID mappings'
 $tcpEndpoints = @()
 $udpEndpoints = @()
 $tcpStatus = 'NOT_RUN'
@@ -381,7 +387,7 @@ if ($endpointIds.Count -gt 0) {
                 Where-Object { $endpointIds.ContainsKey([int]$_.ProcessId) })
             foreach ($process in $processRows) { $processes[[int]$process.ProcessId] = $process }
             $processStatus = if ($processes.Count -gt 0) { 'FOUND' } else { 'NONE' }
-            $processDetail = 'linked process records: {0}' -f $processes.Count
+            $processDetail = 'linked process records: {0}; paths reported: {1}' -f $processes.Count, @($processes.Values | Where-Object { $_.ExecutablePath }).Count
         } catch {
             $processStatus = Get-FailureStatus $_
             $processDetail = Get-FailureDetail $_
@@ -413,8 +419,8 @@ $tcpReportDetail = if ($tcpStatus -in @('FOUND', 'NONE')) { 'count: {0}' -f $tcp
 $udpReportDetail = if ($udpStatus -in @('FOUND', 'NONE')) { 'count: {0}' -f $udpEndpoints.Count } else { $udpDetail }
 Write-Result -Status $tcpStatus -Title 'TCP listeners' -Source 'Get-NetTCPConnection (State=Listen)' -Scope 'all local addresses' -Lines $tcpLines -Detail $tcpReportDetail
 Write-Result -Status $udpStatus -Title 'UDP bindings' -Source 'Get-NetUDPEndpoint' -Scope 'all local addresses' -Lines $udpLines -Detail $udpReportDetail
-Write-Result -Status $processStatus -Title 'Process owner lookup' -Source 'Win32_Process' -Scope 'endpoint PIDs only' -Detail $processDetail
-Write-Result -Status $serviceStatus -Title 'Service owner lookup' -Source 'Win32_Service' -Scope 'endpoint PIDs only' -Detail $serviceDetail
+Write-Result -Status $processStatus -Title 'Endpoint process metadata' -Source 'Win32_Process' -Scope 'endpoint PIDs only' -Detail $processDetail
+Write-Result -Status $serviceStatus -Title 'Endpoint service mapping' -Source 'Win32_Service' -Scope 'endpoint PIDs only' -Detail $serviceDetail
 
 Write-Section 'Current-user credential-source clues'
 $profilePath = ''
