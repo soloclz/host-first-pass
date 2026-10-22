@@ -457,14 +457,14 @@ build_root_scan() {
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
         \( -iname '*password*' -o -iname '*secret*'
            -o -iname '*credential*' -o -iname '*token*' -o -iname '*note*'
-           -o -iname '*.env' -o -iname '*.bak' -o -iname '*.old' \) -ls)
+           -o -iname '*.env' \) -ls)
       ;;
     config-names)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
         \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
            -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
-           -o -iname '*.xml' -o -iname '*config*.php'
-           -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls)
+           -o -iname '*.xml'
+           -o -name 'config' \) -ls)
       ;;
     history-names)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
@@ -852,7 +852,7 @@ run_probe 'Interesting filenames from /' 'find / -xdev -type f' \
   "/ on root filesystem; selected name patterns; metadata only; ${ROOT_METADATA_SECONDS}s" \
   scan_root candidate-names
 run_probe 'Config file candidates from /' 'find / -xdev -type f (config names)' \
-  "/ on root filesystem; common config extensions, *config*.php and fixed names; ${ROOT_METADATA_SECONDS}s" \
+  "/ on root filesystem; common config extensions including .xml, plus the file named config; ${ROOT_METADATA_SECONDS}s" \
   scan_root config-names
 run_probe 'History file candidates from /' 'find / -xdev -type f (history names)' \
   "/ on root filesystem; *_hist/*_history names and metadata; ${ROOT_METADATA_SECONDS}s" \
