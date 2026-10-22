@@ -301,7 +301,58 @@ print_save_tail() {
 
 section() { printf '\n=== %s ===\n' "$1"; }
 
-show_path() { printf '%q\n' "${PATH-}"; }
+show_path() {
+  local remaining=${PATH-} token checked kind exists directory writable enterable cwd
+  local index=0 more
+
+  printf 'raw=%q\n' "${PATH-}" || return 141
+  cwd=$(builtin pwd -P 2>/dev/null) || cwd=
+  printf 'cwd=%q\n' "${cwd:-<unavailable>}" || return 141
+  while :; do
+    if [[ $remaining == *:* ]]; then
+      token=${remaining%%:*}
+      remaining=${remaining#*:}
+      more=1
+    else
+      token=$remaining
+      more=0
+    fi
+    ((index += 1))
+
+    case $token in
+      '') kind=current-directory-empty-entry; checked=${cwd:-.} ;;
+      .) kind=current-directory; checked=${cwd:-.} ;;
+      /*) kind=absolute; checked=$token ;;
+      *)
+        kind=relative
+        checked=$token
+        if [[ -n $cwd ]]; then checked=${cwd%/}/$token; fi
+        ;;
+    esac
+
+    exists=not-confirmed
+    directory=not-confirmed
+    writable=not-confirmed
+    enterable=not-confirmed
+    if [[ -e $checked ]]; then
+      exists=yes
+      directory=no
+      writable=n/a
+      enterable=n/a
+      if [[ -d $checked ]]; then
+        directory=yes
+        writable=no
+        enterable=no
+        [[ -w $checked ]] && writable=yes
+        [[ -x $checked ]] && enterable=yes
+      fi
+    fi
+    printf 'entry=%d token=%q checked=%q kind=%s exists=%s directory=%s writable=%s enterable=%s\n' \
+      "$index" "$token" "$checked" "$kind" "$exists" "$directory" "$writable" "$enterable" || return 141
+
+    (( more )) || break
+  done
+}
 
 show_environment() {
   if ! have env || ! env -0 >/dev/null 2>&1; then
@@ -725,7 +776,8 @@ run_probe 'Host name' 'hostname' 'local host' hostname
 run_probe 'OS release' '/etc/os-release' 'local OS release file' cat /etc/os-release
 run_probe 'Kernel and architecture' 'uname -a' 'running kernel' uname -a
 run_probe 'CPU' 'lscpu' 'local CPU inventory' lscpu
-run_probe 'PATH' 'script process PATH' 'current script process' show_path
+run_probe 'PATH' 'script process PATH and directory checks' \
+  'current script process and identity; entries in search order' show_path
 run_probe 'Environment' 'env -0' 'current script process; all exported pairs' show_environment
 run_probe 'Valid login shells' '/etc/shells' 'local shell list' cat /etc/shells
 run_probe 'Debian installed packages' 'dpkg-query -W' 'local dpkg database; installed rows' show_dpkg_packages
