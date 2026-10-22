@@ -62,7 +62,7 @@ case $# in
         show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|show_nfs_export_configs|\
         show_defense_tools|show_common_tools|show_system_cron_entries|\
         show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
-        show_ad_join_clues|show_dpkg_packages|show_apk_packages|show_current_ssh|\
+        show_ad_join_clues|show_dpkg_packages|show_running_kernel_package|show_apk_packages|show_current_ssh|\
         show_history_paths|show_cron_paths|show_group_sockets|\
         show_disk_device_access|show_logrotate_configs|show_writable_log_candidates) FULL_HELPER=$2 ;;
         *) usage >&2; exit 2 ;;
@@ -849,6 +849,37 @@ show_dpkg_packages() {
     awk -F '\t' 'substr($1, 2, 1) == "i" { print }'
 }
 
+show_running_kernel_package() {
+  if ! have uname || ! have dpkg-query; then
+    printf 'uname or dpkg-query unavailable\n' >&2
+    return 127
+  fi
+  local release package row status name version query_rc found=0
+  release=$(uname -r) || return $?
+  printf 'running_kernel=%s\n' "$release"
+  for package in "linux-image-$release" "linux-image-unsigned-$release"; do
+    row=$(dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
+      -- "$package" 2>"$PROBE_DIR/kernel-dpkg-error")
+    query_rc=$?
+    if (( query_rc != 0 )); then
+      if (( query_rc == 1 )) &&
+         grep -q '^dpkg-query: no packages found matching ' "$PROBE_DIR/kernel-dpkg-error"; then
+        continue
+      fi
+      cat "$PROBE_DIR/kernel-dpkg-error" >&2
+      return "$query_rc"
+    fi
+    IFS=$'\t' read -r status name version <<< "$row"
+    if [[ ${status:1:1} == i ]]; then
+      printf 'installed_image_package=%s version=%s\n' "$name" "$version"
+      found=1
+    fi
+  done
+  if (( ! found )); then
+    printf 'installed_image_package=not found in local dpkg database for running kernel\n'
+  fi
+}
+
 show_apk_packages() {
   if ! have apk; then
     printf 'apk unavailable\n' >&2
@@ -1065,6 +1096,8 @@ run_probe 'Current identity' 'id' 'current process credentials' id
 run_probe 'Host name' 'hostname' 'local host' hostname
 run_probe 'OS release' '/etc/os-release' 'local OS release file' cat /etc/os-release
 run_probe 'Kernel and architecture' 'uname -a' 'running kernel' uname -a
+run_probe 'Running kernel image package' 'uname -r; targeted dpkg-query -W' \
+  'running kernel release; installed Debian/Ubuntu image package matching that release' show_running_kernel_package
 run_probe 'CPU' 'lscpu' 'local CPU inventory' lscpu
 run_probe 'PATH' 'script process PATH and directory checks' \
   'current script process and identity; entries in search order' show_path
