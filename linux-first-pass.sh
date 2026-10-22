@@ -28,6 +28,9 @@ CONTENT_GREP_BATCH='
 ENV_NAMES_ONLY=0
 FULL_HELPER=
 CURRENT_HOME=${HOME:-}
+WRITABLE_ROOTS=("${HOME:-}" /etc /usr/local /opt /srv /app /var/www /var/backups
+  /var/log /tmp /var/tmp /dev/shm /mnt /media /root)
+LOG_CANDIDATE_ARGS=( -type f \( -iname '*.log' -o -iname '*.log.*' -o -path '/var/log/*' \) )
 umask 077
 PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/linux-first-pass.XXXXXXXX") || {
   printf 'Cannot create temporary probe buffer\n' >&2
@@ -61,7 +64,7 @@ case $# in
         show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
         show_ad_join_clues|show_dpkg_packages|show_apk_packages|show_current_ssh|\
         show_history_paths|show_cron_paths|show_group_sockets|\
-        show_disk_device_access) FULL_HELPER=$2 ;;
+        show_disk_device_access|show_logrotate_configs|show_writable_log_candidates) FULL_HELPER=$2 ;;
         *) usage >&2; exit 2 ;;
       esac
     else
@@ -177,6 +180,13 @@ run_probe() {
     status=UNAVAILABLE
   else
     status=ERROR
+  fi
+
+  if [[ $status != FOUND && $status != NONE ]] && (( rc != 4 )); then
+    if [[ $1 == scan_root && ${2:-} == writable ]] ||
+       [[ $1 == scan_paths && ${4:-} == writable-files ]]; then
+      printf '%s\n' "$status" >> "$PROBE_DIR/writable-source-status"
+    fi
   fi
 
   detail="exit=$rc; elapsed=${elapsed}s; count-unit=stdout-lines"
@@ -571,6 +581,7 @@ build_path_scan() {
 
 scan_paths() {
   local root=$1 depth=$2 kind=$3
+  local capture
   if [[ ! -d $root ]]; then
     printf 'root absent: %s\n' "$root" >&2
     return 4
@@ -580,7 +591,13 @@ scan_paths() {
     return 127
   fi
   build_path_scan "$root" "$depth" "$kind" || return $?
-  timeout "${SCAN_SECONDS}s" find "${PATH_SCAN_ARGS[@]}"
+  if [[ $kind == writable-files ]]; then
+    capture=$(mktemp "$PROBE_DIR/writable-logs.XXXXXXXX") || return 1
+    timeout "${SCAN_SECONDS}s" find "${PATH_SCAN_ARGS[@]}" \
+      "${LOG_CANDIDATE_ARGS[@]}" -fprint0 "$capture"
+  else
+    timeout "${SCAN_SECONDS}s" find "${PATH_SCAN_ARGS[@]}"
+  fi
 }
 
 ROOT_SCAN_ARGS=()
@@ -654,12 +671,19 @@ build_root_scan() {
 }
 
 scan_root() {
+  local capture
   if ! have find || ! have timeout; then
     printf 'find or timeout unavailable\n' >&2
     return 127
   fi
   build_root_scan "$1" || return $?
-  timeout -k 2s "${ROOT_SCAN_SECONDS}s" find "${ROOT_SCAN_ARGS[@]}"
+  if [[ $1 == writable ]]; then
+    capture=$(mktemp "$PROBE_DIR/writable-logs.XXXXXXXX") || return 1
+    timeout -k 2s "${ROOT_SCAN_SECONDS}s" find "${ROOT_SCAN_ARGS[@]}" \
+      "${LOG_CANDIDATE_ARGS[@]}" -fprint0 "$capture"
+  else
+    timeout -k 2s "${ROOT_SCAN_SECONDS}s" find "${ROOT_SCAN_ARGS[@]}"
+  fi
 }
 
 show_defense_tools() {
@@ -845,6 +869,124 @@ show_cron_paths() {
   return "$failed"
 }
 
+show_logrotate_configs() {
+  local path readable metadata failed=0
+  if ! have stat; then return 127; fi
+  if [[ -d /etc/logrotate.d && ( ! -r /etc/logrotate.d || ! -x /etc/logrotate.d ) ]]; then
+    printf 'Permission denied: /etc/logrotate.d\n' >&2
+    failed=1
+  fi
+  for path in /etc/logrotate.conf /etc/logrotate.d/*; do
+    [[ -e $path || -L $path ]] || continue
+    [[ -f $path || -L $path ]] || continue
+    readable=no
+    [[ -r $path ]] && readable=yes
+    metadata=$(stat -Lc 'mode=%A uid=%u gid=%g' -- "$path" 2>/dev/null) || {
+      printf 'Metadata unavailable: %s\n' "$path" >&2
+      failed=1
+      continue
+    }
+    printf 'path=%q readable=%s %s\n' "$path" "$readable" "$metadata" || return 141
+  done
+  return "$failed"
+}
+
+capture_full_writable_log_paths() {
+  local root depth capture scan_rc rc=0
+  if ! have find || ! have timeout; then return 127; fi
+
+  capture=$(mktemp "$PROBE_DIR/writable-logs.XXXXXXXX") || return 1
+  scan_rc=0
+  timeout -k 2s 90s find / -xdev -ignore_readdir_race -mindepth 1 \
+    -type f -writable "${LOG_CANDIDATE_ARGS[@]}" -fprint0 "$capture" || scan_rc=$?
+  (( scan_rc == 0 )) || rc=$scan_rc
+
+  for root in "${WRITABLE_ROOTS[@]}"; do
+    [[ -n $root && -d $root ]] || continue
+    depth=3
+    [[ -n $CURRENT_HOME && $root == "$CURRENT_HOME" ]] && depth=4
+    [[ $root == /var/log ]] && depth=5
+    capture=$(mktemp "$PROBE_DIR/writable-logs.XXXXXXXX") || return 1
+    scan_rc=0
+    timeout -k 2s 30s find -H "$root" -xdev -maxdepth "$depth" -mindepth 1 \
+      -type f -writable "${LOG_CANDIDATE_ARGS[@]}" -fprint0 "$capture" || scan_rc=$?
+    if (( scan_rc != 0 && rc == 0 )); then rc=$scan_rc; fi
+  done
+  return "$rc"
+}
+
+show_writable_log_candidates() {
+  local capture path directory parent file_meta directory_meta parent_meta sorted
+  local file_writable directory_writable directory_enterable parent_writable parent_enterable
+  local scan_rc=0 started limit=$SCAN_SECONDS cached_directory= cached_parent=
+  local -a captures=() sort_status=()
+  if ! have stat || ! have sort; then return 127; fi
+  if [[ $FULL_HELPER == show_writable_log_candidates ]]; then
+    limit=120
+    capture_full_writable_log_paths || scan_rc=$?
+  fi
+  for capture in "$PROBE_DIR"/writable-logs.*; do
+    [[ -f $capture ]] && captures+=("$capture")
+  done
+  if (( ${#captures[@]} == 0 )); then
+    if [[ -z $FULL_HELPER && -s $PROBE_DIR/writable-source-status ]]; then
+      printf 'One or more source writable scans did not complete; review their status lines.\n' >&2
+      if grep -qx INCOMPLETE "$PROBE_DIR/writable-source-status"; then return 124; fi
+      if grep -qx DENIED "$PROBE_DIR/writable-source-status"; then
+        printf 'Permission denied in a source writable scan.\n' >&2
+        return 1
+      fi
+      return 2
+    fi
+    return "$scan_rc"
+  fi
+  sorted=$(mktemp "$PROBE_DIR/writable-logs-sorted.XXXXXXXX") || return 1
+  started=$SECONDS
+  cat -- "${captures[@]}" | timeout -k 2s "${limit}s" sort -zu > "$sorted"
+  sort_status=("${PIPESTATUS[@]}")
+  if (( sort_status[0] != 0 )); then return "${sort_status[0]}"; fi
+  if (( sort_status[1] != 0 )); then return "${sort_status[1]}"; fi
+
+  while IFS= read -r -d '' path; do
+      if (( SECONDS - started >= limit )); then return 124; fi
+      file_meta=$(stat -Lc 'mode=%A uid=%u gid=%g' -- "$path" 2>/dev/null) || {
+        printf 'path=%q state=missing-or-inaccessible-after-scan\n' "$path" || return 141
+        continue
+      }
+      directory=${path%/*}
+      [[ -n $directory ]] || directory=/
+      parent=${directory%/*}
+      [[ -n $parent ]] || parent=/
+      file_writable=no; [[ -w $path ]] && file_writable=yes
+      if [[ $directory != "$cached_directory" ]]; then
+        directory_meta=$(stat -Lc 'mode=%A uid=%u gid=%g' -- "$directory" 2>/dev/null) || directory_meta=metadata-unavailable
+        directory_writable=no; [[ -w $directory ]] && directory_writable=yes
+        directory_enterable=no; [[ -x $directory ]] && directory_enterable=yes
+        cached_directory=$directory
+      fi
+      if [[ $parent != "$cached_parent" ]]; then
+        parent_meta=$(stat -Lc 'mode=%A uid=%u gid=%g' -- "$parent" 2>/dev/null) || parent_meta=metadata-unavailable
+        parent_writable=no; [[ -w $parent ]] && parent_writable=yes
+        parent_enterable=no; [[ -x $parent ]] && parent_enterable=yes
+        cached_parent=$parent
+      fi
+      printf 'path=%q file_writable=%s file_%s log_directory=%q directory_writable=%s directory_enterable=%s directory_%s parent=%q parent_writable=%s parent_enterable=%s parent_%s\n' \
+        "$path" "$file_writable" "$file_meta" "$directory" "$directory_writable" \
+        "$directory_enterable" "$directory_meta" "$parent" "$parent_writable" \
+        "$parent_enterable" "$parent_meta" || return 141
+  done < "$sorted"
+  if [[ -z $FULL_HELPER && -s $PROBE_DIR/writable-source-status ]]; then
+    printf 'One or more source writable scans did not complete; review their status lines.\n' >&2
+    if grep -qx INCOMPLETE "$PROBE_DIR/writable-source-status"; then return 124; fi
+    if grep -qx DENIED "$PROBE_DIR/writable-source-status"; then
+      printf 'Permission denied in a source writable scan.\n' >&2
+      return 1
+    fi
+    return 2
+  fi
+  return "$scan_rc"
+}
+
 CAPABILITY_ROOTS=()
 build_capability_roots() {
   local root
@@ -947,6 +1089,12 @@ run_probe 'Cron directory entries' 'find cron roots -maxdepth 1 -ls' \
   'existing /etc/cron.* and /var/spool/cron directories; immediate entry metadata' show_cron_directory_entries
 run_probe 'Current crontab' 'crontab -l' \
   'current identity; own scheduled jobs when crontab is available' show_current_crontab
+run_probe 'Logrotate version' 'logrotate --version 2>&1' \
+  'installed logrotate version if available; no rotation triggered' \
+  timeout "${SCAN_SECONDS}s" bash -c 'logrotate --version 2>&1'
+run_probe 'Logrotate configuration paths' '/etc/logrotate.conf and /etc/logrotate.d/*' \
+  'standard config paths; immediate files and symlinks; metadata and current-user readability only' \
+  show_logrotate_configs
 
 section 'Container and namespace context'
 run_probe 'PID 1 cgroup' '/proc/1/cgroup' 'PID 1 in current PID namespace' cat /proc/1/cgroup
@@ -1093,10 +1241,11 @@ run_probe 'Writable paths from /' 'find / -xdev -writable' \
 run_probe 'SUID or SGID files from /' 'find / -xdev -perm -4000/-2000' \
   "/ on root filesystem; regular files; ${ROOT_METADATA_SECONDS}s" \
   scan_root suid-sgid
-for root in "${HOME:-}" /etc /usr/local /opt /srv /app /var/www /var/backups /tmp /var/tmp /dev/shm /mnt /media /root; do
+for root in "${WRITABLE_ROOTS[@]}"; do
   [[ -n $root ]] || continue
   depth=3
   [[ -n $CURRENT_HOME && $root == "$CURRENT_HOME" ]] && depth=4
+  [[ $root == /var/log ]] && depth=5
   run_probe "Writable directories in $root" 'find -type d -writable -executable' \
     "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
     scan_paths "$root" "$depth" writable-dirs
@@ -1104,6 +1253,9 @@ for root in "${HOME:-}" /etc /usr/local /opt /srv /app /var/www /var/backups /tm
     "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
     scan_paths "$root" "$depth" writable-files
 done
+run_probe 'Writable log candidates' 'root:writable and focused writable-files scans' \
+  'deduplicated writable *.log/*.log.* paths and files under /var/log; file, log directory and parent access; upstream scan limits apply' \
+  show_writable_log_candidates
 for root in /bin /sbin /usr/bin /usr/sbin /usr/local /opt /srv /app /var/www /mnt /media; do
   run_probe "SUID or SGID files in $root" 'find -perm -4000/-2000' \
     "$root; depth<=3; same filesystem; ${SCAN_SECONDS}s" \
