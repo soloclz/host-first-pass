@@ -340,7 +340,7 @@ PATH_SCAN_ARGS=()
 
 build_path_scan() {
   local root=$1 depth=$2 kind=$3
-  PATH_SCAN_ARGS=("$root" -xdev -maxdepth "$depth" -mindepth 1)
+  PATH_SCAN_ARGS=(-H "$root" -xdev -maxdepth "$depth" -mindepth 1)
   case $kind in
     hidden)
       PATH_SCAN_ARGS+=(-name '.*' -ls)
@@ -355,6 +355,7 @@ build_path_scan() {
       PATH_SCAN_ARGS+=(-type f
         \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
            -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
+           -o -iname '*.xml' -o -iname '*config*.php'
            -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls)
       ;;
     config-content)
@@ -365,6 +366,7 @@ build_path_scan() {
       PATH_SCAN_ARGS+=(-type f -size -1048576c -readable
         \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
            -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
+           -o -iname '*.xml' -o -iname '*config*.php'
            -o -name '.env' -o -name 'config' -o -name 'credentials' \)
         -exec bash -c '
           pattern=$1
@@ -461,6 +463,7 @@ build_root_scan() {
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
         \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
            -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
+           -o -iname '*.xml' -o -iname '*config*.php'
            -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls)
       ;;
     history-names)
@@ -472,7 +475,8 @@ build_root_scan() {
         \( -iname '*backup*' -o -iname '*.bak' -o -iname '*.old'
            -o -iname '*.log' -o -iname '*.log.*' -o -iname '*.sql'
            -o -iname '*.sql.gz' -o -iname '*.tgz'
-           -o -iname '*.tar.gz' -o -iname '*.zip' \) -ls)
+           -o -iname '*.tar.gz' -o -iname '*.zip' -o -iname '*.db'
+           -o -iname '*.sqlite' -o -iname '*.sqlite3' \) -ls)
       ;;
     recent-files)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f -mtime -7 -ls)
@@ -848,13 +852,13 @@ run_probe 'Interesting filenames from /' 'find / -xdev -type f' \
   "/ on root filesystem; selected name patterns; metadata only; ${ROOT_METADATA_SECONDS}s" \
   scan_root candidate-names
 run_probe 'Config file candidates from /' 'find / -xdev -type f (config names)' \
-  "/ on root filesystem; .conf/.config/.ini/.yaml/.yml/.json/.env and fixed config names; ${ROOT_METADATA_SECONDS}s" \
+  "/ on root filesystem; common config extensions, *config*.php and fixed names; ${ROOT_METADATA_SECONDS}s" \
   scan_root config-names
 run_probe 'History file candidates from /' 'find / -xdev -type f (history names)' \
   "/ on root filesystem; *_hist/*_history names and metadata; ${ROOT_METADATA_SECONDS}s" \
   scan_root history-names
-run_probe 'Backup and log filename candidates from /' 'find / -xdev -type f (backup/log names)' \
-  "/ on root filesystem; backup, .bak/.old, log and SQL names and metadata; ${ROOT_METADATA_SECONDS}s" \
+run_probe 'Backup, log and database filename candidates from /' 'find / -xdev -type f (backup/log/database names)' \
+  "/ on root filesystem; backup, log, SQL, .db/.sqlite/.sqlite3 names and metadata; ${ROOT_METADATA_SECONDS}s" \
   scan_root backup-log-names
 run_probe 'Executable candidates in application roots' 'find custom roots -executable -ls' \
   "/usr/local/bin,/usr/local/sbin,/opt,/srv,/app,/home and temporary roots; depth<=4; ${ROOT_METADATA_SECONDS}s" \
@@ -884,6 +888,11 @@ for root in /tmp /var/tmp /dev/shm; do
   run_probe "Entries in $root" 'find file metadata' \
     "$root; depth<=2; same filesystem; ${SCAN_SECONDS}s" \
     scan_paths "$root" 2 temp
+done
+for root in /var/mail /var/spool; do
+  run_probe "Files in $root" 'find -type f -ls' \
+    "$root; depth<=2; same filesystem; file metadata only; ${SCAN_SECONDS}s" \
+    scan_paths "$root" 2 all-files
 done
 
 for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups /var/lib /run /mnt /media /root; do
