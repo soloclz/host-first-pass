@@ -60,7 +60,8 @@ case $# in
         show_defense_tools|show_common_tools|show_system_cron_entries|\
         show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
         show_ad_join_clues|show_dpkg_packages|show_apk_packages|show_current_ssh|\
-        show_history_paths|show_cron_paths) FULL_HELPER=$2 ;;
+        show_history_paths|show_cron_paths|show_group_sockets|\
+        show_disk_device_access) FULL_HELPER=$2 ;;
         *) usage >&2; exit 2 ;;
       esac
     else
@@ -388,6 +389,66 @@ show_groups() {
   awk -F: '{ printf "%s gid=%s members=%s\n", $1, $3, $4 }' /etc/group
 }
 
+in_group() {
+  local names
+  names=$(id -nG) || return 1
+  [[ " $names " == *" $1 "* ]]
+}
+
+show_group_sockets() {
+  if ! have stat; then
+    printf 'stat unavailable\n' >&2
+    return 127
+  fi
+  local group path prior writable metadata duplicate
+  local -a seen=()
+  for group in docker lxd; do
+    in_group "$group" || continue
+    if [[ $group == docker ]]; then
+      set -- /var/run/docker.sock /run/docker.sock
+    else
+      set -- /var/snap/lxd/common/lxd/unix.socket /var/lib/lxd/unix.socket
+    fi
+    for path; do
+      [[ -S $path ]] || continue
+      duplicate=0
+      for prior in "${seen[@]}"; do
+        [[ $path -ef $prior ]] && { duplicate=1; break; }
+      done
+      (( duplicate )) && continue
+      seen+=("$path")
+      writable=no
+      [[ -w $path ]] && writable=yes
+      metadata=$(stat -Lc 'mode=%A owner=%U group=%G' -- "$path") || return $?
+      printf 'group=%s path=%q writable=%s %s\n' \
+        "$group" "$path" "$writable" "$metadata" || return 141
+    done
+  done
+}
+
+show_disk_device_access() {
+  in_group disk || return 0
+  if ! have find || ! have stat || ! have timeout; then
+    printf 'find, stat or timeout unavailable\n' >&2
+    return 127
+  fi
+  timeout "${SCAN_SECONDS}s" find /dev -xdev -type b -exec bash -c '
+    failed=0
+    for path; do
+      readable=no; writable=no
+      [[ -r $path ]] && readable=yes
+      [[ -w $path ]] && writable=yes
+      metadata=$(stat -Lc "mode=%A owner=%U group=%G" -- "$path") || {
+        failed=1
+        continue
+      }
+      printf "path=%q readable=%s writable=%s %s\n" \
+        "$path" "$readable" "$writable" "$metadata" || exit 141
+    done
+    exit "$failed"
+  ' bash '{}' +
+}
+
 show_resolver() {
   awk '$1 == "nameserver" || $1 == "search" || $1 == "domain" { print }' /etc/resolv.conf
 }
@@ -416,6 +477,9 @@ build_path_scan() {
       ;;
     all-files)
       PATH_SCAN_ARGS+=(-type f -ls)
+      ;;
+    readable-files)
+      PATH_SCAN_ARGS+=(-type f -readable -ls)
       ;;
     config-names)
       PATH_SCAN_ARGS+=(-type f
@@ -560,7 +624,8 @@ show_defense_tools() {
 show_common_tools() {
   local tool path
   for tool in nc ncat netcat socat python3 python2 perl ruby nmap tcpdump \
-              gcc cc make curl wget openssl ssh scp rsync jq strace file; do
+              gcc cc make curl wget openssl ssh scp rsync jq strace file \
+              docker lxc debugfs; do
     if have "$tool"; then
       path=$(command -v "$tool")
       printf '%s present path=%q\n' "$tool" "$path"
@@ -760,7 +825,7 @@ printf 'Time: %s | Host: %s | Identity: %s\n' \
   "$(hostname 2>/dev/null || printf unavailable)" \
   "$(id -un 2>/dev/null || printf unavailable)"
 printf 'Scope: local Linux host, current identity, root filesystem starting at /, and named bounded file roots.\n'
-printf 'Named find scans: max depth 2-4, one filesystem per root, %ss per scan. Display cap per probe: %d lines or %d bytes.\n' \
+printf 'Named find scans: max depth 2-5, one filesystem per root, %ss per scan. Display cap per probe: %d lines or %d bytes.\n' \
   "$SCAN_SECONDS" "$MAX_LINES" "$MAX_BYTES"
 printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; content files < %d bytes.\n' \
   "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS" "$ROOT_FILE_BYTES"
@@ -789,7 +854,7 @@ run_probe 'Alpine installed packages' 'apk v2 info -v / v3 list --installed --ma
 run_probe 'Sudo rules' 'sudo -n -l' 'current identity; no password prompt' env LC_ALL=C sudo -n -l
 run_probe 'Sudo version' 'sudo -V' 'local sudo version and plugin information' timeout "${SCAN_SECONDS}s" sudo -V
 run_probe 'Common tool presence' 'command -v' \
-  'common transfer, interpreter, build, discovery and trace commands; PATH lookup only' show_common_tools
+  'common transfer, interpreter, build, discovery, trace, container and filesystem commands; PATH lookup only' show_common_tools
 
 section 'Processes and local defenses'
 run_probe 'Running processes' 'ps -eo user,pid,ppid,lstart,cmd --forest -ww' \
@@ -852,6 +917,25 @@ if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
   run_probe 'History paths' 'ls -ld' "$HOME shell history metadata; no contents" show_history_paths
 else
   printf '[UNAVAILABLE] Current home, .ssh and history | source: HOME | scope: current script process | HOME unset or not a directory\n'
+fi
+
+if in_group adm || in_group docker || in_group lxd || in_group disk; then
+  section 'Privileged group resources'
+  if in_group adm; then
+    run_probe 'adm readable logs' 'find /var/log -xdev -type f -readable -ls' \
+      "/var/log; depth<=5; same filesystem; file metadata only; ${SCAN_SECONDS}s" \
+      scan_paths /var/log 5 readable-files
+  fi
+  if in_group docker || in_group lxd; then
+    run_probe 'docker/lxd sockets' 'stat known local Unix sockets + test -w' \
+      'current identity; /var/run/docker.sock, /run/docker.sock, and common LXD sockets; metadata and writable test only' \
+      show_group_sockets
+  fi
+  if in_group disk; then
+    run_probe 'disk block devices' 'find /dev -xdev -type b + test -r/-w + stat' \
+      "/dev; current identity; effective readable/writable checks; ${SCAN_SECONDS}s" \
+      show_disk_device_access
+  fi
 fi
 
 section 'Network'
