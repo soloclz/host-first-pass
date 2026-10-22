@@ -805,7 +805,7 @@ CAPABILITY_ROOTS=()
 build_capability_roots() {
   local root
   CAPABILITY_ROOTS=()
-  for root in /usr/bin /usr/sbin /usr/local/bin /opt /srv /app; do
+  for root in /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /srv /app; do
     [[ -d $root ]] && CAPABILITY_ROOTS+=("$root")
   done
   if (( ${#CAPABILITY_ROOTS[@]} == 0 )); then
@@ -1065,7 +1065,7 @@ for root in /bin /sbin /usr/bin /usr/sbin /usr/local /opt /srv /app /var/www /mn
     scan_paths "$root" 3 suid-sgid
 done
 run_probe 'File capabilities' 'getcap -r' \
-  "existing /usr/bin /usr/sbin /usr/local/bin /opt /srv /app; ${SCAN_SECONDS}s" \
+  "existing /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /srv /app; ${SCAN_SECONDS}s" \
   scan_capabilities
 
 printf '\nCandidate paths are leads. Read a selected file to verify content and context. For undisplayed rows or incomplete scans, use the printed full-output follow-up.\n'

@@ -133,7 +133,7 @@ The remaining helper keys use these full commands:
 | Printed key | Full command or source |
 | --- | --- |
 | `scan_application_executables` | `find /usr/local/bin /usr/local/sbin /opt /srv /app /home /tmp /var/tmp /dev/shm -xdev -maxdepth 4 -type f -executable -ls` (remove any absent start paths, as the script does). |
-| `scan_capabilities` | `getcap -r /usr/bin /usr/sbin /usr/local/bin /opt /srv /app` (remove absent roots). |
+| `scan_capabilities` | `getcap -r /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /srv /app` (remove absent roots). |
 | `show_environment` | Recheck the current process environment with `env -0` and the Bash NUL loop below. A later shell has its own current environment, which can differ from the earlier script process. |
 | `show_path` | `bash ./linux-first-pass.sh --full-helper show_path` prints the uncapped PATH entries and directory checks for the rerun process. |
 | `show_passwd_accounts`, `show_groups` | `cat /etc/passwd`, `cat /etc/group` respectively; the script's summaries omit raw password fields. |
