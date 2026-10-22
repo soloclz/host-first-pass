@@ -433,6 +433,50 @@ show_group_sockets() {
   return "$failed"
 }
 
+probe_docker_images() {
+  local socket prior duplicate socket_label found=0
+  local -a candidates=(/var/run/docker.sock /run/docker.sock)
+  local -a seen=()
+
+  if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then
+    candidates+=("${XDG_RUNTIME_DIR%/}/docker.sock")
+  fi
+  candidates+=("/run/user/${EUID}/docker.sock")
+
+  if ! have docker; then
+    printf '[UNAVAILABLE] Docker local images | source: docker image ls --all | scope: known local Unix sockets | docker command unavailable\n'
+    return
+  fi
+  if ! have timeout; then
+    printf '[UNAVAILABLE] Docker local images | source: docker image ls --all | scope: known local Unix sockets | timeout command unavailable\n'
+    return
+  fi
+
+  for socket in "${candidates[@]}"; do
+    [[ -S $socket ]] || continue
+    duplicate=0
+    for prior in "${seen[@]}"; do
+      [[ $socket -ef $prior ]] && { duplicate=1; break; }
+    done
+    (( duplicate )) && continue
+    seen+=("$socket")
+    found=1
+    printf -v socket_label '%q' "$socket"
+    if [[ ! -w $socket ]]; then
+      printf '[DENIED] Docker local images | source: docker image ls --all | scope: socket=%s | socket not writable by current identity\n' "$socket_label"
+      continue
+    fi
+    run_probe 'Docker local images' 'docker image ls --all --no-trunc --format' \
+      "socket=$socket_label; local daemon image cache including untagged images; no pull; ${SCAN_SECONDS}s" \
+      timeout "${SCAN_SECONDS}s" docker -H "unix://$socket" image ls --all --no-trunc \
+        --format 'repository={{.Repository}} tag={{.Tag}} id={{.ID}} size={{.Size}}'
+  done
+
+  if (( ! found )); then
+    printf '[UNAVAILABLE] Docker local images | source: docker image ls --all | scope: known local Unix sockets | no Unix socket visible at checked paths\n'
+  fi
+}
+
 show_disk_device_access() {
   in_group disk || return 0
   if ! have find || ! have stat || ! have timeout; then
@@ -909,6 +953,7 @@ run_probe 'PID 1 cgroup' '/proc/1/cgroup' 'PID 1 in current PID namespace' cat /
 run_probe 'PID 1 and script namespace links' '/proc/1/ns and /proc/self/ns' \
   'namespace links visible in current procfs' ls -l /proc/1/ns /proc/self/ns
 run_probe 'Root mount' 'findmnt -T /' 'filesystem containing / in current mount namespace' findmnt -T /
+probe_docker_images
 
 section 'Accounts and home directories'
 run_probe 'Local passwd accounts' '/etc/passwd (selected fields)' \
