@@ -400,7 +400,7 @@ show_group_sockets() {
     printf 'stat unavailable\n' >&2
     return 127
   fi
-  local group path prior writable metadata duplicate
+  local group path prior writable metadata duplicate failed=0
   local -a seen=()
   for group in docker lxd; do
     in_group "$group" || continue
@@ -410,6 +410,13 @@ show_group_sockets() {
       set -- /var/snap/lxd/common/lxd/unix.socket /var/lib/lxd/unix.socket
     fi
     for path; do
+      metadata=$(stat -Lc 'mode=%A owner=%U group=%G' -- "$path" 2>&1) || {
+        if [[ $metadata != *'No such file or directory'* ]]; then
+          printf '%s\n' "$metadata" >&2
+          failed=1
+        fi
+        continue
+      }
       [[ -S $path ]] || continue
       duplicate=0
       for prior in "${seen[@]}"; do
@@ -419,11 +426,11 @@ show_group_sockets() {
       seen+=("$path")
       writable=no
       [[ -w $path ]] && writable=yes
-      metadata=$(stat -Lc 'mode=%A owner=%U group=%G' -- "$path") || return $?
       printf 'group=%s path=%q writable=%s %s\n' \
         "$group" "$path" "$writable" "$metadata" || return 141
     done
   done
+  return "$failed"
 }
 
 show_disk_device_access() {
@@ -432,7 +439,9 @@ show_disk_device_access() {
     printf 'find, stat or timeout unavailable\n' >&2
     return 127
   fi
-  timeout "${SCAN_SECONDS}s" find /dev -xdev -type b -exec bash -c '
+  local seconds=$SCAN_SECONDS
+  [[ $FULL_HELPER == show_disk_device_access ]] && seconds=30
+  timeout "${seconds}s" find /dev -xdev -type b -exec bash -c '
     failed=0
     for path; do
       readable=no; writable=no

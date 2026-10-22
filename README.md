@@ -137,7 +137,7 @@ The remaining helper keys use these full commands:
 | `show_environment` | Recheck the current process environment with `env -0` and the Bash NUL loop below. A later shell has its own current environment, which can differ from the earlier script process. |
 | `show_path` | `bash ./linux-first-pass.sh --full-helper show_path` prints the uncapped PATH entries and directory checks for the rerun process. |
 | `show_passwd_accounts`, `show_groups` | `cat /etc/passwd`, `cat /etc/group` respectively; the script's summaries omit raw password fields. |
-| `show_group_sockets`, `show_disk_device_access` | Recheck known Docker/LXD Unix sockets or `/dev` block nodes for the current identity. The script only runs each check when `id -nG` contains its matching group; a later session can have different group membership. |
+| `show_group_sockets`, `show_disk_device_access` | Recheck known Docker/LXD Unix sockets or `/dev` block nodes for the current identity. Socket path access errors are reported separately from absent paths. The disk helper allows 30 seconds on a full-output rerun. The script only runs each check when `id -nG` contains its matching group; a later session can have different group membership. |
 | `show_resolver`, `show_fstab` | `cat /etc/resolv.conf`, `cat /etc/fstab` respectively; the script selects resolver directives and suppresses fstab option values. |
 | `show_dpkg_packages` | The output prints a complete uncapped `dpkg-query` and `awk` rerun command. It selects rows whose package status indicates installed. |
 | `show_apk_packages` | `apk info -v` on apk-tools v2 or `apk list --installed --manifest '*'` on v3. |
