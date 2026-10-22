@@ -12,6 +12,19 @@ SCAN_SECONDS=8
 ROOT_METADATA_SECONDS=30
 ROOT_CONTENT_SECONDS=90
 ROOT_FILE_BYTES=262144
+CONTENT_MARKERS='pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key'
+CONTENT_GREP_BATCH='
+  pattern=$1
+  shift
+  grep -IilEZ "$pattern" -- "$@" |
+    while IFS= read -r -d "" path; do
+      printf "%q\n" "$path" || exit 141
+    done
+  result=("${PIPESTATUS[@]}")
+  if (( result[1] != 0 )); then exit "${result[1]}"; fi
+  if (( result[0] > 1 )); then exit 1; fi
+  exit 0
+'
 ENV_NAMES_ONLY=0
 FULL_HELPER=
 CURRENT_HOME=${HOME:-}
@@ -81,6 +94,7 @@ run_probe() {
   local title=$1 source=$2 scope=$3
   shift 3
   local rc capture_rc stderr_capture_rc status detail line matched=0 shown=0 bytes=0
+  local started=$SECONDS elapsed
   local stderr_total=0 stderr_shown=0 stderr_bytes=0
   local -a pipeline_status=()
 
@@ -146,6 +160,7 @@ run_probe() {
   if [[ -f $PROBE_DIR/stderr-meta ]]; then
     read -r stderr_total stderr_shown stderr_bytes < "$PROBE_DIR/stderr-meta"
   fi
+  elapsed=$((SECONDS - started))
 
   if (( capture_rc != 0 || stderr_capture_rc != 0 )); then
     status=ERROR
@@ -163,7 +178,7 @@ run_probe() {
     status=ERROR
   fi
 
-  detail="exit=$rc; count-unit=stdout-lines"
+  detail="exit=$rc; elapsed=${elapsed}s; count-unit=stdout-lines"
   if (( capture_rc != 0 )); then
     detail="$detail; capture exit=$capture_rc"
   fi
@@ -368,21 +383,7 @@ build_path_scan() {
            -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
            -o -iname '*.xml' -o -iname '*config*.php'
            -o -name '.env' -o -name 'config' -o -name 'credentials' \)
-        -exec bash -c '
-          pattern=$1
-          shift
-          failed=0
-          for path do
-            grep -IqiE "$pattern" -- "$path"
-            code=$?
-            if [ "$code" -eq 0 ]; then printf "%q\n" "$path"; fi
-            if [ "$code" -gt 1 ]; then
-              printf "grep read error: %s\n" "$path" >&2
-              failed=1
-            fi
-          done
-          exit "$failed"
-        ' bash 'pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key' '{}' +)
+        -exec bash -c "$CONTENT_GREP_BATCH" bash "$CONTENT_MARKERS" '{}' +)
       ;;
     writable-dirs)
       PATH_SCAN_ARGS+=(-type d -writable -executable -ls)
@@ -429,19 +430,7 @@ build_root_scan() {
       fi
       ROOT_SCAN_SECONDS=$ROOT_CONTENT_SECONDS
       ROOT_SCAN_ARGS+=(-type f -size "-${ROOT_FILE_BYTES}c" -readable
-        -exec bash -c '
-          failed=0
-          for path do
-            grep -IqiE "pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key" -- "$path"
-            code=$?
-            if [ "$code" -eq 0 ]; then printf "%q\n" "$path"; fi
-            if [ "$code" -gt 1 ]; then
-              printf "grep read error: %s\n" "$path" >&2
-              failed=1
-            fi
-          done
-          exit "$failed"
-        ' bash '{}' +)
+        -exec bash -c "$CONTENT_GREP_BATCH" bash "$CONTENT_MARKERS" '{}' +)
       ;;
     shell-scripts)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f

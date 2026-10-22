@@ -35,7 +35,7 @@ The `/` sweeps use GNU `find -xdev`, so they stay on the filesystem that contain
 
 Named file discovery uses GNU `find -H` to follow a symlink used as a starting root, `-xdev` to stay on that root's filesystem, the displayed depth limit, and GNU `timeout` with an eight-second limit per scan. The optional `getcap -r` check is recursive within its named roots and bounded by the same time limit. Named config-content scans only read readable, config-like regular files smaller than 1 MiB. The `/var/www` config scan can surface a `*config*.php` file even when the general `.php` script list exceeds its display limit. The `/var/mail` and `/var/spool` scans list file metadata only. The `/run` scan includes paths such as `/run/tmpfiles.d`, `/run/NetworkManager`, and `/run/systemd/resolve` when present. Hidden-name and home inventories do not depend on content markers. Optional commands and absent roots are reported as `UNAVAILABLE`. A `DENIED` scan can include paths found before access failed.
 
-Every probe prints its source, scope, and status. `FOUND` means output lines were returned, not that a vulnerability or secret was confirmed. `NONE` means the query completed within its stated scope with no output lines. `AUTH_REQUIRED` means `sudo -n -l` needs authentication. `DENIED` is an access failure, `ERROR` is another query failure, and `UNAVAILABLE` means a command or root is absent. `INCOMPLETE` means the producer hit its time limit or ended before completion. The count unit is **stdout lines**: a `find -ls` path inventory emits one line per matching path, whereas a command such as `lastlog` also emits a heading. For a successful scan, `matched`, `shown`, and `undisplayed` are exact counts of stdout lines within its stated scope. `display=TRUNCATED` means only the first 500 whole lines or at most 128 KiB are shown; it does not stop the scan. If the scan times out or fails, `observed`, `shown`, and `undisplayed-observed` count lines produced before failure, and `unscanned=unknown` means the unseen search space cannot be counted. Stderr is counted separately as `stderr-lines`, `stderr-shown`, and `stderr-undisplayed`; the first eight whole lines or 8 KiB are shown. The printed full-output command saves all rerun stderr in `$HOME/first-pass-full.err`. The script drains stdout, keeps only the display prefix in a restricted temporary directory, then removes that directory on exit. Full counting can take longer than the old display-stop behavior, up to the stated time limit for each bounded scan. `LC_ALL=C` makes status checks for command errors consistent. These limits apply to each probe, not to the total transcript.
+Each status line names its source and scope; queries that ran also show elapsed whole seconds for the query and capture. `FOUND` means output lines were returned, not that a vulnerability or secret was confirmed. `NONE` means the query completed within its stated scope with no output lines. `AUTH_REQUIRED` means `sudo -n -l` needs authentication. `DENIED` is an access failure, `ERROR` is another query failure, and `UNAVAILABLE` means a command or root is absent. `INCOMPLETE` means the producer hit its time limit or ended before completion. The count unit is **stdout lines**: a `find -ls` path inventory emits one line per matching path, whereas a command such as `lastlog` also emits a heading. For a successful scan, `matched`, `shown`, and `undisplayed` are exact counts of stdout lines within its stated scope. `display=TRUNCATED` means only the first 500 whole lines or at most 128 KiB are shown; it does not stop the scan. If the scan times out or fails, `observed`, `shown`, and `undisplayed-observed` count lines produced before failure, and `unscanned=unknown` means the unseen search space cannot be counted. Stderr is counted separately as `stderr-lines`, `stderr-shown`, and `stderr-undisplayed`; the first eight whole lines or 8 KiB are shown. The printed full-output command saves all rerun stderr in `$HOME/first-pass-full.err`. The script drains stdout, keeps only the display prefix in a restricted temporary directory, then removes that directory on exit. Full counting can take longer than the old display-stop behavior, up to the stated time limit for each bounded scan. `LC_ALL=C` makes status checks for command errors consistent. These limits apply to each probe, not to the total transcript.
 
 ### Linux full-output follow-up
 
@@ -68,15 +68,17 @@ For `root:credential-content`, use the same size, access, binary, and marker pre
 ```bash
 find / -xdev -ignore_readdir_race -type f -size -262144c -readable \
   -exec bash -c '
-    failed=0
-    for path do
-      grep -IqiE "pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key" -- "$path"
-      code=$?
-      if [ "$code" -eq 0 ]; then printf "%q\n" "$path"; fi
-      if [ "$code" -gt 1 ]; then printf "grep read error: %s\n" "$path" >&2; failed=1; fi
-    done
-    exit "$failed"
-  ' bash '{}' +
+    pattern=$1
+    shift
+    grep -IilEZ "$pattern" -- "$@" |
+      while IFS= read -r -d "" path; do
+        printf "%q\n" "$path" || exit 141
+      done
+    result=("${PIPESTATUS[@]}")
+    if (( result[1] != 0 )); then exit "${result[1]}"; fi
+    if (( result[0] > 1 )); then exit 1; fi
+    exit 0
+  ' bash 'pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key' '{}' +
 ```
 
 For `path:KIND`, set `ROOT` and `DEPTH` to the printed parameters. The first pass follows a symlink starting root, tests only paths at depth one or deeper, and does not cross filesystems from that root. `find -ls` escapes unusual characters so each item stays on one row:
@@ -111,14 +113,14 @@ find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f -size -1048576c -re
   -exec bash -c '
     pattern=$1
     shift
-    failed=0
-    for path do
-      grep -IqiE "$pattern" -- "$path"
-      code=$?
-      if [ "$code" -eq 0 ]; then printf "%q\n" "$path"; fi
-      if [ "$code" -gt 1 ]; then printf "grep read error: %s\n" "$path" >&2; failed=1; fi
-    done
-    exit "$failed"
+    grep -IilEZ "$pattern" -- "$@" |
+      while IFS= read -r -d "" path; do
+        printf "%q\n" "$path" || exit 141
+      done
+    result=("${PIPESTATUS[@]}")
+    if (( result[1] != 0 )); then exit "${result[1]}"; fi
+    if (( result[0] > 1 )); then exit 1; fi
+    exit 0
   ' bash 'pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key' '{}' +
 ```
 
