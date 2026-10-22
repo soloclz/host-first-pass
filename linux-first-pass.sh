@@ -59,7 +59,7 @@ case $# in
   2)
     if [[ $1 == --full-helper ]]; then
       case $2 in
-        show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|\
+        show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|show_nfs_export_configs|\
         show_defense_tools|show_common_tools|show_system_cron_entries|\
         show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
         show_ad_join_clues|show_dpkg_packages|show_apk_packages|show_current_ssh|\
@@ -524,6 +524,36 @@ show_fstab() {
       printf "source=%s target=%s type=%s options=%s\n", $1, $2, $3, marker
     }
   ' /etc/fstab
+}
+
+show_nfs_export_configs() {
+  local path metadata readable found=0 failed=0
+  if ! have stat || ! have awk; then return 127; fi
+  if [[ -d /etc/exports.d && ( ! -r /etc/exports.d || ! -x /etc/exports.d ) ]]; then
+    printf 'Permission denied: /etc/exports.d\n' >&2
+    failed=1
+  fi
+  for path in /etc/exports /etc/exports.d/*.exports; do
+    [[ -e $path || -L $path ]] || continue
+    [[ -f $path || -L $path ]] || continue
+    found=1
+    readable=no
+    [[ -r $path ]] && readable=yes
+    metadata=$(stat -Lc 'mode=%A uid=%u gid=%g' -- "$path" 2>/dev/null) || {
+      printf 'Metadata unavailable: %s\n' "$path" >&2
+      failed=1
+      continue
+    }
+    printf 'path=%q readable=%s %s\n' "$path" "$readable" "$metadata" || return 141
+    if [[ $readable == yes ]]; then
+      awk 'NF && $1 !~ /^#/ { print "  " $0 }' "$path" || failed=1
+    else
+      printf 'Permission denied: %s\n' "$path" >&2
+      failed=1
+    fi
+  done
+  if (( !found && !failed )); then return 4; fi
+  return "$failed"
 }
 
 PATH_SCAN_ARGS=()
@@ -1163,6 +1193,9 @@ run_probe 'Filesystem capacity' 'df -h' 'mounted filesystems; 8s limit for unres
   timeout "${SCAN_SECONDS}s" df -h
 run_probe 'Static mount entries' '/etc/fstab (selected fields)' \
   'noncomment fstab entries; options values suppressed' show_fstab
+run_probe 'NFS export configuration' '/etc/exports and /etc/exports.d/*.exports' \
+  'local NFS server config; file metadata and readable noncomment lines' \
+  show_nfs_export_configs
 run_probe 'Printers' 'lpstat -p -d' 'local printer status if tool is installed' lpstat -p -d
 
 section 'Interesting file candidates'
