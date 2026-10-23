@@ -101,8 +101,10 @@ run_probe() {
   local started=$SECONDS elapsed
   local stderr_total=0 stderr_shown=0 stderr_bytes=0
   local -a pipeline_status=()
+  LAST_PROBE_STATUS=
 
   if ! have "$1"; then
+    LAST_PROBE_STATUS=UNAVAILABLE
     printf '[UNAVAILABLE] %s | source: %s | scope: %s | command unavailable: %s\n' \
       "$title" "$source" "$scope" "$1"
     return
@@ -181,6 +183,7 @@ run_probe() {
   else
     status=ERROR
   fi
+  LAST_PROBE_STATUS=$status
 
   if [[ $status != FOUND && $status != NONE ]] && (( rc != 4 )); then
     if [[ $1 == scan_root && ${2:-} == writable ]] ||
@@ -1307,10 +1310,32 @@ section 'SUID, SGID and file capabilities'
 run_probe 'SUID or SGID files from /' 'find / -xdev -perm -4000/-2000' \
   "/ on root filesystem; regular files; ${ROOT_METADATA_SECONDS}s" \
   scan_root suid-sgid
-for root in /bin /sbin /usr/bin /usr/sbin /usr/local /opt /srv /app /var/www /mnt /media; do
+suid_seen_roots=()
+suid_seen_sources=()
+for root in /usr/bin /usr/sbin /bin /sbin /usr/local /opt /srv /app /var/www /mnt /media; do
+  suid_canonical=$root
+  if [[ -d $root ]] && have readlink; then
+    suid_canonical=$(readlink -f -- "$root" 2>/dev/null) || suid_canonical=$root
+  fi
+  suid_duplicate_of=
+  for index in "${!suid_seen_roots[@]}"; do
+    if [[ $suid_canonical == "${suid_seen_roots[index]}" ]]; then
+      suid_duplicate_of=${suid_seen_sources[index]}
+      break
+    fi
+  done
+  if [[ -n $suid_duplicate_of ]]; then
+    printf 'Alias start skipped: %q resolves to %q; same directory as %q\n' \
+      "$root" "$suid_canonical" "$suid_duplicate_of"
+    continue
+  fi
   run_probe "SUID or SGID files in $root" 'find -perm -4000/-2000' \
     "$root; depth<=3; same filesystem; ${SCAN_SECONDS}s" \
     scan_paths "$root" 3 suid-sgid
+  if [[ $LAST_PROBE_STATUS == FOUND || $LAST_PROBE_STATUS == NONE ]]; then
+    suid_seen_roots+=("$suid_canonical")
+    suid_seen_sources+=("$root")
+  fi
 done
 run_probe 'File capabilities' 'getcap -r' \
   "existing /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /srv /app; ${SCAN_SECONDS}s" \
