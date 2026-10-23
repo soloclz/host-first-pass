@@ -115,7 +115,7 @@ Read a selected candidate file with the commands in the pentest notes after conf
 
 ## Windows
 
-`windows-first-pass.ps1` prints a fixed, read-only snapshot when you first reach a Windows host. It uses Windows PowerShell 5.1 and has no required parameters.
+`windows-first-pass.ps1` uses Windows PowerShell 5.1. With no flags, it prints a read-only host snapshot. File search flags run only the selected searches and skip the host snapshot.
 
 Clone the repository and run the script locally:
 
@@ -125,15 +125,30 @@ cd host-first-pass
 powershell.exe -NoProfile -File .\windows-first-pass.ps1
 ```
 
-The default run prints every environment variable name and value in the current PowerShell process. To see every name without values, use:
+The default snapshot prints every environment variable name and value in the current PowerShell process. It also includes service command lines and scheduled task arguments, which may contain secrets. Save its transcript in restricted engagement evidence. The script writes to stdout and creates no report file.
+
+Run selected file searches with one or more short flags:
 
 ```powershell
-powershell.exe -NoProfile -File .\windows-first-pass.ps1 -EnvironmentNamesOnly
+powershell.exe -NoProfile -File .\windows-first-pass.ps1 -n
+powershell.exe -NoProfile -File .\windows-first-pass.ps1 -c -s -p "C:\inetpub\wwwroot"
+powershell.exe -NoProfile -File .\windows-first-pass.ps1 -k -p "C:\inetpub\wwwroot" -SearchSeconds 180
 ```
 
-The script prints plain text to the console and can be piped to `Tee-Object`. It does not write a report, contact another host, recursively search files, or print file contents, process command lines, or Credential Manager secret values. Environment values can contain secrets; a shell transcript or a pipeline that saves the output will capture them.
+| Flag | Selected file search |
+| --- | --- |
+| `-n` | Credential-related filenames: names containing `password`, `passwd`, `passphrase`, `secret`, `credential`, `token`, `note`, `unattend`, or `sysprep`; `.env` variants, selected SSH/key files, registry hive names, and selected credential-store or configuration exports. |
+| `-c` | Configuration filenames: `.conf`, `.config`, `.ini`, `.yaml`, `.yml`, `.json`, `.xml`, `.toml`, `.properties`, `config`, and `.env` variants. |
+| `-s` | Script and source filenames, including PowerShell, batch/CMD, VBScript, JavaScript, Python, PHP, ASP/ASPX, Java, C#, and related extensions. |
+| `-a` | History, backup, log, SQL, database, and archive filenames. |
+| `-k` | Case-insensitive credential-like text in readable files smaller than 128 KiB. It prints matching paths, not matching text. UTF-16 files need a BOM; files with NUL bytes after decoding are skipped as binary. |
+| `-p PATH` | Use one selected absolute directory on a local fixed or removable drive. Without `-p`, a selected search starts at every ready local fixed-drive root, such as `C:\` and `D:\`. UNC and mapped network paths are excluded. |
+| `-FullOutput` | Print every observed match while scanning instead of retaining only a display prefix. The time limit still applies. |
+| `-SearchSeconds N` | Set the cooperative time limit for the selected traversal, from 1 to 3600 seconds; default 90. |
 
-The environment section uses PowerShell's `[Environment]::GetEnvironmentVariables('Process')`. For a manual check in PowerShell, run `Get-ChildItem Env:`. In CMD, `set` prints `name=value` pairs; in PowerShell, bare `set` is an alias for `Set-Variable`.
+The selected categories share one traversal, so combining flags does not walk the same root once per category. Searches include hidden entries, skip nested reparse points, and stay within the selected local roots. `-p` also rejects a start whose ancestor is a reparse point. A filename matching multiple categories appears in each selected category. The script checks the time between entries; a slow directory operation can finish after the stated limit. Use a discovered application directory with `-p` to focus the search. A current directory such as `C:\Windows\System32\inetsrv` identifies IIS tools, not the site's physical path; inspect site or virtual-directory configuration to choose that path.
+
+The default snapshot does not recursively search files or print file contents, Credential Manager secret values, or running-process command lines from `tasklist`. It does print configured service `PathName` and scheduled task action `Execute`/`Arguments`. The selected `-k` search reads eligible files but prints only paths. The environment section uses `[Environment]::GetEnvironmentVariables('Process')`. For a manual check in PowerShell, run `Get-ChildItem Env:`. In CMD, `set` prints `name=value` pairs; bare `set` in PowerShell is an alias for `Set-Variable`.
 
 ### Windows checks
 
@@ -141,20 +156,25 @@ The environment section uses PowerShell's `[Environment]::GetEnvironmentVariable
 | --- | --- | --- |
 | Identity and token | `whoami /all` | Current process token: user, groups, privileges, and integrity information. Highlights Event Log Readers SID (`S-1-5-32-573`) when present; inspect its attributes and check Security log access separately. |
 | Operating system | `Win32_OperatingSystem` via `Get-CimInstance`; `CurrentBuild` and `UBR` in `HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion` | Local OS name, version, architecture, base build, and full build when both registry values exist. |
+| Host role, local accounts and shares | `Win32_ComputerSystem`, `Win32_UserAccount`, `Win32_Group`, `Win32_Share` | Domain role and join state; local SAM users and groups on non-DC hosts; local share definitions and paths. A DC skips the local SAM inventory. Each query has its own status. |
 | Installed OS updates | `Win32_QuickFixEngineering` via `Get-CimInstance` | Every CBS-reported QFE record: `HotFixID`, `InstalledOn`, and record count. `InstalledOn` is shown as returned by PowerShell, without date sorting. |
 | UAC policy | `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` | Raw `EnableLUA` and `ConsentPromptBehaviorAdmin` values. `EnableLUA=1` enables Admin Approval Mode; `ConsentPromptBehaviorAdmin=5` is the default prompt for consent for non-Windows binaries. Compare the policy with the current process token above when assessing elevation. |
 | Windows Installer policy | `AlwaysInstallElevated` in `HKCU:\SOFTWARE\Policies\Microsoft\Windows\Installer` and `HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer` | Reports each value and type. The summary distinguishes both values enabled, HKLM enabled with HKCU not yet enabled, HKLM not enabled, and uncertain registry reads. A missing key or value is reported as `NONE` for that registry read. |
 | Running processes | `tasklist /v /fo csv /nh` | Local process PID, image name, session number, and reported account. `N/A` accounts are shown as `(not reported)`; unexpected CSV is reported as `ERROR`. |
+| Services and scheduled tasks | `Win32_Service`, `Get-ScheduledTask` | Every returned service name, state, start mode, run account, PID, and configured command; every returned task with principal, state, actions and trigger summaries. Endpoint mapping reuses the service query. A denied query is reported without treating it as an empty inventory. |
 | Logon sessions | `quser` | Sessions visible on the local host to the current account, including state and logon time. |
 | Kerberos tickets | `klist` | Tickets cached in the current logon session; read the displayed ticket count, principals, and times. |
+| Network configuration | `ipconfig /all`, `route print`, `Get-NetNeighbor` (or `arp -a` when unavailable) | Reported interfaces, addresses, DNS, IPv4/IPv6 routes, and up to 100 neighbor entries. `arp -a` covers IPv4 only. |
 | Network endpoints | `Get-NetTCPConnection` for `State=Listen` and `State=Established`; `Get-NetUDPEndpoint` | All local TCP listeners and bound UDP endpoints, plus the first 100 established TCP connections with local/remote address, port, and PID. Established connections report total, shown, and not shown counts. |
 | Endpoint PID metadata | `Win32_Process`, `Win32_Service` via `Get-CimInstance` | Process name and any reported executable path, plus service names mapped by PID, for endpoint PIDs only. The output counts linked process records and paths returned. |
+| Logical drives and top-level names | `Win32_LogicalDisk`, `Get-ChildItem -Force` | Drive type, filesystem, capacity and provider; up to 100 top-level entries per local fixed drive. The directory listing does not recurse into `C:\` or other drive roots. |
 | User profile | `Environment.SpecialFolder.UserProfile`, `Get-ChildItem` | Current user profile path, up to 100 top-level names, and up to 100 names, byte lengths, and modification times immediately inside `.ssh`; no file contents or recursion. Each list reports total, shown, and not shown counts. |
 | Sticky Notes database | `Environment.SpecialFolder.LocalApplicationData`, `Test-Path` | Checks whether `plum.sqlite` exists at the current user's fixed Sticky Notes package path; prints the path when found, not the notes. |
+| PSReadLine history | `Get-PSReadLineOption`, `Get-Item` | Current PowerShell host's history path, save style, and file size/modification time when present; no history content. |
 | Credential Manager | `cmdkey /list` | Current user's stored target and account metadata; no stored passwords. |
-| Environment | `[Environment]::GetEnvironmentVariables('Process')` | All names and values in the current PowerShell process by default; all names without values with `-EnvironmentNamesOnly`. Names and values are JSON-escaped so each pair stays on one console line. |
+| Environment | `[Environment]::GetEnvironmentVariables('Process')` | All names and values in the current PowerShell process. Names and values are JSON-escaped so each pair stays on one console line. |
 
-For profile, `.ssh`, and TCP established connection lists, `display: TRUNCATED` means `not shown` rows were counted but omitted from the console. In the same user's PowerShell session, rerun the relevant query to see the full list. These queries produce a new snapshot; network connections may change between runs.
+For profile, `.ssh`, fixed-drive top-level, neighbor, and TCP established connection lists, `display: TRUNCATED` means `not shown` rows were counted but omitted from the console. In the same user's PowerShell session, rerun the relevant query to see the full list. These queries produce a new snapshot; network entries may change between runs.
 
 ```powershell
 $profilePath = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
@@ -168,11 +188,22 @@ if (Test-Path -LiteralPath $sshPath -PathType Container) {
 Get-NetTCPConnection -State Established |
     Sort-Object LocalPort,LocalAddress,RemotePort,RemoteAddress,OwningProcess |
     Format-List LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess
+Get-NetNeighbor | Format-List InterfaceIndex,IPAddress,LinkLayerAddress,State
+Get-ChildItem -LiteralPath 'C:\' -Force | Sort-Object Name |
+    Format-List FullName,Mode,Length,LastWriteTime
 ```
 
 The TCP query lists all connection endpoints and PIDs. For a selected PID, inspect `Win32_Process` and `Win32_Service` to recover process path and service name where accessible.
 
-Each probe shows its source, scope, and status. `FOUND` means the probe returned rows or the named path exists. `QUERY_OK` means `cmdkey /list` or `klist` ran successfully; inspect the displayed text to tell whether stored targets or cached tickets are present. `NONE` means the query succeeded with no rows, the user profile path is unavailable, or the `.ssh` directory is absent. `DENIED` means access was refused, `ERROR` means a query failed, `UNAVAILABLE` means its command is missing, and `NOT_RUN` means a dependent query was skipped. An endpoint can disappear between the network and process queries, so a missing process record at query time needs a fresh check. `path=(not reported)` means `Win32_Process.ExecutablePath` returned no value for that process; the current token can see a PID without access to its path. Service names are mapped by PID and do not establish which service in a shared process owns a socket. [Win32_Process](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process) · [Win32_Service](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-service)
+Each optional search reports its exact root, observed `matched` paths, `shown` paths, `undisplayed-observed` paths, access failures, and whether unscanned space remains. Without `-FullOutput`, each category shows at most 500 path lines or 128 KiB of displayed path text; a truncated category prints a command to rerun that category with `-FullOutput`. The rerun still obeys `-SearchSeconds`. `INCOMPLETE` means the traversal reached its time limit or a directory, file metadata, or content read failed; `unscanned=unknown` means no complete inventory exists for that scope. On timeout, the script prints a rerun command with the same categories and root plus a larger `-SearchSeconds`, up to 3600. A search can show `display=COMPLETE` and still be `INCOMPLETE`: the display label covers only the matches observed so far. The final counters include visited directories and files, skipped reparse points, files at least 128 KiB, and binary files skipped by `-k`. A match is a candidate path to inspect, not a confirmed credential.
+
+To retain all observed paths from a focused rerun, redirect output in PowerShell:
+
+```powershell
+powershell.exe -NoProfile -File .\windows-first-pass.ps1 -c -s -p "C:\inetpub\wwwroot" -FullOutput -SearchSeconds 300 > .\first-pass-files.txt
+```
+
+Each default snapshot probe shows its source, scope, and status. `FOUND` means the probe returned rows or the named path exists. `QUERY_OK` means `cmdkey /list` or `klist` ran successfully; inspect the displayed text to tell whether stored targets or cached tickets are present. `NONE` means the query succeeded with no rows, the user profile path is unavailable, or the `.ssh` directory is absent. `DENIED` means access was refused, `ERROR` means a query failed, `UNAVAILABLE` means its command is missing, and `NOT_RUN` means a dependent query was skipped. An endpoint can disappear between the network and process queries, so a missing process record at query time needs a fresh check. `path=(not reported)` means `Win32_Process.ExecutablePath` returned no value for that process; the current token can see a PID without access to its path. Service names are mapped by PID and do not establish which service in a shared process owns a socket. [Win32_Process](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process) · [Win32_Service](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-service)
 
 For `Elevated MSI policy condition`, `FOUND` means both values are `REG_DWORD 1` for the current user and host; verify the token of any process launched by the MSI. `CANDIDATE` means HKLM is `REG_DWORD 1` while HKCU is known to differ or is absent; the current user can set HKCU to `REG_DWORD 1` and recheck. `NONE` means HKLM is known not to be `REG_DWORD 1`, so changing HKCU alone cannot enable this policy. `DENIED` or `ERROR` means a necessary registry read failed and the policy condition is uncertain.
 
