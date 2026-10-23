@@ -12,7 +12,7 @@ SCAN_SECONDS=8
 ROOT_METADATA_SECONDS=30
 ROOT_CONTENT_SECONDS=90
 CONTENT_SMALL_BYTES=131072
-CONTENT_MARKERS='pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key'
+CONTENT_MARKERS="password|passwd|passphrase|(^|[^[:alnum:]])pass[[:space:]]*['\"]?[[:space:]]*[:=]|secret|token|credential|api[[:space:]_-]*key|private[[:space:]_-]*key"
 CONTENT_GREP_BATCH='
   pattern=$1
   shift
@@ -685,16 +685,29 @@ build_root_scan() {
       ;;
     candidate-names)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
-        \( -iname '*password*' -o -iname '*secret*'
+        \( -iname '*password*' -o -iname '*passwd*' -o -iname '*secret*'
            -o -iname '*credential*' -o -iname '*token*' -o -iname '*note*'
-           -o -iname '*.env' \) -ls)
+           -o -iname '*.env' -o -iname '.env.*'
+           -o -name '.netrc' -o -name '.git-credentials' -o -name '.pgpass'
+           -o -name '.my.cnf' -o -name 'config' -o -name 'kubeconfig'
+           -o -name '*.keytab' -o -name '*.ccache' -o -name '*.kdbx')
+      if (( CUSTOM_ROOT )) && [[ $root != / ]]; then
+        ROOT_SCAN_ARGS+=(-o -name 'id_*')
+      else
+        ROOT_SCAN_ARGS+=(-o \( -name 'id_*' \( -path '/home/*' -o -path '/root/*')
+        if [[ -n $CURRENT_HOME && $CURRENT_HOME != / ]]; then
+          ROOT_SCAN_ARGS+=(-o -path "${CURRENT_HOME%/}/*")
+        fi
+        ROOT_SCAN_ARGS+=(\) \))
+      fi
+      ROOT_SCAN_ARGS+=(\) -ls)
       ;;
     config-names)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
         \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
            -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
-           -o -iname '*.xml'
-           -o -name 'config' \) -ls)
+           -o -iname '*.xml' -o -iname '*.toml' -o -iname '*.properties'
+           -o -name 'config' -o -name '.env' -o -name '.env.*' \) -ls)
       ;;
     history-names)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
@@ -1143,6 +1156,15 @@ if (( SELECTED_MODE )); then
     run_probe 'Credential-related filename candidates' 'find -type f (credential names)' \
       "$SEARCH_ROOT; same filesystem; metadata; ${ROOT_METADATA_SECONDS}s" \
       scan_root candidate-names "$SEARCH_ROOT"
+    if (( !CUSTOM_ROOT )) && [[ -n $CURRENT_HOME && -d $CURRENT_HOME ]] && have stat; then
+      root_device=$(stat -Lc %d -- / 2>/dev/null) || root_device=
+      home_device=$(stat -Lc %d -- "$CURRENT_HOME" 2>/dev/null) || home_device=
+      if [[ -n $root_device && -n $home_device && $root_device != "$home_device" ]]; then
+        run_probe 'Credential-related filenames in current home mount' 'find -type f (credential names)' \
+          "$CURRENT_HOME; separate filesystem; metadata; ${ROOT_METADATA_SECONDS}s" \
+          scan_root candidate-names "$CURRENT_HOME"
+      fi
+    fi
   fi
   if (( SELECT_C )); then
     section 'Config filenames'
