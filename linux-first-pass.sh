@@ -62,7 +62,7 @@ case $# in
         show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|show_nfs_export_configs|\
         show_defense_tools|show_common_tools|show_system_cron_entries|\
         show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
-        show_ad_join_clues|show_dpkg_packages|show_running_kernel_package|show_apk_packages|show_current_ssh|\
+        show_ad_join_clues|show_dpkg_packages|show_running_kernel_package|show_pkexec|show_apk_packages|show_current_ssh|\
         show_history_paths|show_cron_paths|show_group_sockets|\
         show_disk_device_access|show_logrotate_configs|show_writable_log_candidates) FULL_HELPER=$2 ;;
         *) usage >&2; exit 2 ;;
@@ -880,6 +880,51 @@ show_running_kernel_package() {
   fi
 }
 
+show_pkexec() {
+  local path=/usr/bin/pkexec resolved metadata owner_row package row status name version rc
+  [[ -e $path || -L $path ]] || return 0
+  if ! have readlink || ! have stat; then
+    printf 'readlink or stat unavailable\n' >&2
+    return 127
+  fi
+  resolved=$(readlink -f -- "$path") || return $?
+  metadata=$(stat -Lc 'mode=%A(%a) owner=%U:%G uid=%u gid=%g' -- "$path") || return $?
+  printf 'path=%q resolved=%q %s\n' "$path" "$resolved" "$metadata"
+
+  if ! have dpkg-query; then
+    printf 'owning_package=unavailable (dpkg-query unavailable)\n'
+    return 0
+  fi
+  owner_row=$(dpkg-query -S -- "$resolved" 2>"$PROBE_DIR/pkexec-dpkg-error")
+  rc=$?
+  if (( rc != 0 )); then
+    if (( rc == 1 )) &&
+       grep -q '^dpkg-query: no path found matching pattern ' "$PROBE_DIR/pkexec-dpkg-error"; then
+      printf 'owning_package=not found in dpkg database\n'
+      return 0
+    fi
+    cat "$PROBE_DIR/pkexec-dpkg-error" >&2
+    return "$rc"
+  fi
+  if [[ $owner_row != *': '* || $owner_row == *$'\n'* ]]; then
+    printf 'unexpected dpkg ownership result: %s\n' "$owner_row" >&2
+    return 2
+  fi
+  package=${owner_row%%: *}
+  if [[ -z $package || $package == *,* ]]; then
+    printf 'ambiguous dpkg ownership result: %s\n' "$owner_row" >&2
+    return 2
+  fi
+  row=$(dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' \
+    -- "$package") || return $?
+  IFS=$'\t' read -r status name version <<< "$row"
+  if [[ ${status:1:1} != i || -z $name || -z $version ]]; then
+    printf 'owning package is not installed in dpkg database: %s\n' "$package" >&2
+    return 2
+  fi
+  printf 'owning_package=%s version=%s\n' "$name" "$version"
+}
+
 show_apk_packages() {
   if ! have apk; then
     printf 'apk unavailable\n' >&2
@@ -1104,6 +1149,8 @@ run_probe 'PATH' 'script process PATH and directory checks' \
 run_probe 'Environment' 'env -0' 'current script process; all exported pairs' show_environment
 run_probe 'Valid login shells' '/etc/shells' 'local shell list' cat /etc/shells
 run_probe 'Debian installed packages' 'dpkg-query -W' 'local dpkg database; installed rows' show_dpkg_packages
+run_probe 'pkexec mode and package' 'stat -L; targeted dpkg-query -S/-W' \
+  '/usr/bin/pkexec if present; resolved file mode/owner and Debian owning package build' show_pkexec
 run_probe 'RPM installed packages' 'rpm -qa' 'local RPM database' \
   rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}.%{ARCH}\t%{EPOCH}\n'
 run_probe 'Arch installed packages' 'pacman -Q' 'local pacman database' pacman -Q
