@@ -27,6 +27,14 @@ CONTENT_GREP_BATCH='
 '
 ENV_NAMES_ONLY=0
 FULL_HELPER=
+SELECT_N=0
+SELECT_C=0
+SELECT_S=0
+SELECT_A=0
+SELECT_K=0
+SELECTED_MODE=0
+SEARCH_ROOT=/
+CUSTOM_ROOT=0
 CURRENT_HOME=${HOME:-}
 WRITABLE_ROOTS=("${HOME:-}" /etc /usr/local /opt /srv /app /var/www /var/backups
   /var/log /tmp /var/tmp /dev/shm /mnt /media /root)
@@ -41,48 +49,67 @@ trap 'rm -rf -- "$PROBE_DIR"' EXIT
 usage() {
   cat <<'USAGE'
 Usage: bash linux-first-pass.sh [--environment-names-only]
+       bash linux-first-pass.sh [-n] [-c] [-s] [-a] [-k] [-p DIR]
        bash linux-first-pass.sh --full-helper NAME
        bash linux-first-pass.sh --full-helper show_environment --environment-names-only
-Prints a local host snapshot and bounded file candidates to stdout.
+With no category flag, prints a local host snapshot and small-file content candidates.
+Category flags run only the selected file searches: -n credential names,
+-c config names, -s scripts, -a history/backup/log/database names,
+-k credential-like text in readable files under 128 KiB.
+-p DIR searches the selected categories under DIR instead of /; it requires
+at least one category flag. Each search stays on its starting filesystem.
 USAGE
 }
 
-case $# in
-  0) ;;
-  1)
+if [[ ${1:-} == --full-helper ]]; then
+  if (( $# == 2 )) ||
+     { (( $# == 3 )) && [[ $2 == show_environment && $3 == --environment-names-only ]]; }; then
+    case $2 in
+      show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|show_nfs_export_configs|\
+      show_defense_tools|show_common_tools|show_system_cron_entries|\
+      show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
+      show_ad_join_clues|show_dpkg_packages|show_running_kernel_package|show_user_namespace_limits|show_pkexec|show_apk_packages|show_current_ssh|\
+      show_history_paths|show_cron_paths|show_group_sockets|\
+      show_disk_device_access|show_logrotate_configs|show_writable_log_candidates) FULL_HELPER=$2 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    (( $# == 3 )) && ENV_NAMES_ONLY=1
+  else
+    usage >&2
+    exit 2
+  fi
+else
+  while (( $# )); do
     case $1 in
+      -n) SELECT_N=1; SELECTED_MODE=1 ;;
+      -c) SELECT_C=1; SELECTED_MODE=1 ;;
+      -s) SELECT_S=1; SELECTED_MODE=1 ;;
+      -a) SELECT_A=1; SELECTED_MODE=1 ;;
+      -k) SELECT_K=1; SELECTED_MODE=1 ;;
+      -p)
+        if (( $# < 2 )) || [[ $2 == -* ]]; then usage >&2; exit 2; fi
+        SEARCH_ROOT=$2
+        CUSTOM_ROOT=1
+        shift
+        ;;
       --environment-names-only) ENV_NAMES_ONLY=1 ;;
       -h|--help) usage; exit 0 ;;
       *) usage >&2; exit 2 ;;
     esac
-    ;;
-  2)
-    if [[ $1 == --full-helper ]]; then
-      case $2 in
-        show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|show_nfs_export_configs|\
-        show_defense_tools|show_common_tools|show_system_cron_entries|\
-        show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
-        show_ad_join_clues|show_dpkg_packages|show_running_kernel_package|show_user_namespace_limits|show_pkexec|show_apk_packages|show_current_ssh|\
-        show_history_paths|show_cron_paths|show_group_sockets|\
-        show_disk_device_access|show_logrotate_configs|show_writable_log_candidates) FULL_HELPER=$2 ;;
-        *) usage >&2; exit 2 ;;
-      esac
-    else
-      usage >&2
+    shift
+  done
+  if (( SELECTED_MODE && ENV_NAMES_ONLY )) ||
+     (( CUSTOM_ROOT && !SELECTED_MODE )); then
+    usage >&2
+    exit 2
+  fi
+  if (( CUSTOM_ROOT )); then
+    if [[ $SEARCH_ROOT != /* || ! -d $SEARCH_ROOT ]]; then
+      printf 'Search root must be an existing absolute directory: %q\n' "$SEARCH_ROOT" >&2
       exit 2
     fi
-    ;;
-  3)
-    if [[ $1 == --full-helper && $2 == show_environment && $3 == --environment-names-only ]]; then
-      FULL_HELPER=show_environment
-      ENV_NAMES_ONLY=1
-    else
-      usage >&2
-      exit 2
-    fi
-    ;;
-  *) usage >&2; exit 2 ;;
-esac
+  fi
+fi
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -238,7 +265,7 @@ run_probe() {
 show_followup() {
   case $1 in
     scan_root)
-      if build_root_scan "$2"; then
+      if build_root_scan "$2" "${3:-/}"; then
         printf '  full-output command: umask 077; LC_ALL=C '
         printf '%q ' find "${ROOT_SCAN_ARGS[@]}"
         print_save_tail
@@ -628,8 +655,8 @@ ROOT_SCAN_ARGS=()
 ROOT_SCAN_SECONDS=$ROOT_METADATA_SECONDS
 
 build_root_scan() {
-  local kind=$1
-  ROOT_SCAN_ARGS=(/ -xdev -ignore_readdir_race)
+  local kind=$1 root=${2:-/}
+  ROOT_SCAN_ARGS=(-H "$root" -xdev -ignore_readdir_race)
   ROOT_SCAN_SECONDS=$ROOT_METADATA_SECONDS
   case $kind in
     credential-content-small|credential-content-large)
@@ -702,7 +729,7 @@ scan_root() {
     printf 'find or timeout unavailable\n' >&2
     return 127
   fi
-  build_root_scan "$1" || return $?
+  build_root_scan "$1" "${2:-/}" || return $?
   if [[ $1 == writable ]]; then
     capture=$(mktemp "$PROBE_DIR/writable-logs.XXXXXXXX") || return 1
     timeout -k 2s "${ROOT_SCAN_SECONDS}s" find "${ROOT_SCAN_ARGS[@]}" \
@@ -1107,15 +1134,59 @@ if [[ -n $FULL_HELPER ]]; then
   exit $?
 fi
 
+if (( SELECTED_MODE )); then
+  printf 'Linux first pass: selected file searches\n'
+  printf 'Search root: %q | one filesystem per search | display cap: %d lines or %d bytes per probe\n' \
+    "$SEARCH_ROOT" "$MAX_LINES" "$MAX_BYTES"
+  if (( SELECT_N )); then
+    section 'Credential-related filenames'
+    run_probe 'Credential-related filename candidates' 'find -type f (credential names)' \
+      "$SEARCH_ROOT; same filesystem; metadata; ${ROOT_METADATA_SECONDS}s" \
+      scan_root candidate-names "$SEARCH_ROOT"
+  fi
+  if (( SELECT_C )); then
+    section 'Config filenames'
+    run_probe 'Config file candidates' 'find -type f (config names)' \
+      "$SEARCH_ROOT; same filesystem; metadata; ${ROOT_METADATA_SECONDS}s" \
+      scan_root config-names "$SEARCH_ROOT"
+  fi
+  if (( SELECT_S )); then
+    section 'Scripts and source filenames'
+    run_probe 'Shell script candidates' 'find -type f (shell script extensions)' \
+      "$SEARCH_ROOT; same filesystem; .sh/.bash/.zsh/.ksh metadata; ${ROOT_METADATA_SECONDS}s" \
+      scan_root shell-scripts "$SEARCH_ROOT"
+    run_probe 'Other script candidates' 'find -type f (script extensions)' \
+      "$SEARCH_ROOT; same filesystem; .py/.pl/.rb/.php/.lua/.js/.ps1 metadata; ${ROOT_METADATA_SECONDS}s" \
+      scan_root other-scripts "$SEARCH_ROOT"
+  fi
+  if (( SELECT_A )); then
+    section 'History, backup, log and database filenames'
+    run_probe 'History file candidates' 'find -type f (history names)' \
+      "$SEARCH_ROOT; same filesystem; *_hist/*_history metadata; ${ROOT_METADATA_SECONDS}s" \
+      scan_root history-names "$SEARCH_ROOT"
+    run_probe 'Backup, log and database filename candidates' 'find -type f (backup/log/database names)' \
+      "$SEARCH_ROOT; same filesystem; metadata; ${ROOT_METADATA_SECONDS}s" \
+      scan_root backup-log-names "$SEARCH_ROOT"
+  fi
+  if (( SELECT_K )); then
+    section 'Credential-like content markers'
+    run_probe 'Credential-like text markers in small files' 'find -type f + grep -IilE' \
+      "$SEARCH_ROOT; same filesystem; readable regular files <${CONTENT_SMALL_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
+      scan_root credential-content-small "$SEARCH_ROOT"
+  fi
+  printf '\nCandidate paths are leads. Read a selected file to verify content and context.\n'
+  exit 0
+fi
+
 printf 'Linux first pass\n'
 printf 'Time: %s | Host: %s | Identity: %s\n' \
   "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unavailable)" \
   "$(hostname 2>/dev/null || printf unavailable)" \
   "$(id -un 2>/dev/null || printf unavailable)"
-printf 'Scope: local Linux host, current identity, root filesystem starting at /, and named bounded file roots.\n'
+printf 'Scope: local Linux host, current identity, root filesystem starting at /, and bounded privilege-related file roots.\n'
 printf 'Named find scans: max depth 2-5, one filesystem per root, %ss per scan. Display cap per probe: %d lines or %d bytes.\n' \
   "$SCAN_SECONDS" "$MAX_LINES" "$MAX_BYTES"
-printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; content split at %d bytes.\n' \
+printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; content files below %d bytes.\n' \
   "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS" "$CONTENT_SMALL_BYTES"
 if (( ENV_NAMES_ONLY )); then
   printf 'Environment: names only from this script process.\n'
@@ -1330,75 +1401,9 @@ run_probe 'Writable log candidates' 'root:writable and focused writable-files sc
   'deduplicated writable *.log/*.log.* paths and files under /var/log; file, log directory and parent access; upstream scan limits apply' \
   show_writable_log_candidates
 
-section 'Scripts from /'
-run_probe 'Shell script candidates from /' 'find / -xdev -type f (shell script extensions)' \
-  "/ on root filesystem; .sh/.bash/.zsh/.ksh paths and metadata; ${ROOT_METADATA_SECONDS}s" \
-  scan_root shell-scripts
-run_probe 'Other script candidates from /' 'find / -xdev -type f (script extensions)' \
-  "/ on root filesystem; .py/.pl/.rb/.php/.lua/.js/.ps1 paths and metadata; ${ROOT_METADATA_SECONDS}s" \
-  scan_root other-scripts
-
-section 'Content and filename candidates from /'
+section 'Credential-like content markers in small files'
 run_probe 'Credential-like text markers in small files from /' 'find / -xdev + grep -IilE' \
   "/ on root filesystem; readable regular files <${CONTENT_SMALL_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
   scan_root credential-content-small
-run_probe 'Credential-like text markers in large files from /' 'find / -xdev + grep -IilE' \
-  "/ on root filesystem; readable regular files >=${CONTENT_SMALL_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
-  scan_root credential-content-large
-run_probe 'Interesting filenames from /' 'find / -xdev -type f' \
-  "/ on root filesystem; selected name patterns; metadata only; ${ROOT_METADATA_SECONDS}s" \
-  scan_root candidate-names
-run_probe 'Config file candidates from /' 'find / -xdev -type f (config names)' \
-  "/ on root filesystem; common config extensions including .xml, plus the file named config; ${ROOT_METADATA_SECONDS}s" \
-  scan_root config-names
-run_probe 'History file candidates from /' 'find / -xdev -type f (history names)' \
-  "/ on root filesystem; *_hist/*_history names and metadata; ${ROOT_METADATA_SECONDS}s" \
-  scan_root history-names
-run_probe 'Backup, log and database filename candidates from /' 'find / -xdev -type f (backup/log/database names)' \
-  "/ on root filesystem; backup, log, SQL, .db/.sqlite/.sqlite3 names and metadata; ${ROOT_METADATA_SECONDS}s" \
-  scan_root backup-log-names
-
-section 'Home, temporary and mail candidates'
-if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
-  run_probe 'Hidden paths in current home' 'find hidden names' \
-    "$HOME; depth<=4; same filesystem; ${SCAN_SECONDS}s" \
-    scan_paths "$HOME" 4 hidden
-else
-  printf '[UNAVAILABLE] Current-home file scans | source: HOME | scope: current script process | HOME unset or not a directory\n'
-fi
-run_probe 'Hidden paths in /home' 'find hidden names' \
-  "/home; depth<=2; same filesystem; ${SCAN_SECONDS}s" \
-  scan_paths /home 2 hidden
-if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
-  run_probe 'All files in current home' 'find -type f' \
-    "$HOME; depth<=4; same filesystem; ${SCAN_SECONDS}s" \
-    scan_paths "$HOME" 4 all-files
-fi
-run_probe 'All files in /home' 'find -type f' \
-  "/home; depth<=3; same filesystem; ${SCAN_SECONDS}s" \
-  scan_paths /home 3 all-files
-for root in /tmp /var/tmp /dev/shm; do
-  run_probe "Entries in $root" 'find file metadata' \
-    "$root; depth<=2; same filesystem; ${SCAN_SECONDS}s" \
-    scan_paths "$root" 2 temp
-done
-for root in /var/mail /var/spool; do
-  run_probe "Files in $root" 'find -type f -ls' \
-    "$root; depth<=2; same filesystem; file metadata only; ${SCAN_SECONDS}s" \
-    scan_paths "$root" 2 all-files
-done
-
-section 'Config candidates in selected roots'
-for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups /var/lib /run /mnt /media /root; do
-  [[ -n $root ]] || continue
-  depth=3
-  [[ -n $CURRENT_HOME && $root == "$CURRENT_HOME" ]] && depth=4
-  run_probe "Config-like filenames in $root" 'find config-like names' \
-    "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
-    scan_paths "$root" "$depth" config-names
-  run_probe "Config content markers in $root" 'find + grep -IilE' \
-    "$root; depth<=$depth; readable config-like files of any size; paths only; ${SCAN_SECONDS}s" \
-    scan_paths "$root" "$depth" config-content
-done
 
 printf '\nCandidate paths are leads. Read a selected file to verify content and context. For undisplayed rows or incomplete scans, use the printed full-output follow-up.\n'
