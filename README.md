@@ -18,7 +18,26 @@ bash ./linux-first-pass.sh --environment-names-only
 
 The default output can contain secrets from environment values, process and cron command lines, policy directives, paths, account names, and mount metadata. Save a transcript only in restricted engagement evidence. File discovery probes print candidate paths and metadata; content-marker probes read selected readable files and print matching paths only. The system cron and password-policy probes print selected noncomment lines from their source files.
 
-The `=== ... ===` lines divide the Linux output into topics; the `[FOUND]`, `[DENIED]`, and other status lines mark individual probes within each topic. `grep -n '^=== ' first-pass.txt` lists all topics with line numbers. In `less -S first-pass.txt`, search `/^=== ` to move between topics or `/^\[` to move between probe results, then press `n` for the next match or `N` for the previous one. Each probe displays at most 500 whole stdout lines or 128 KiB. Its status reports how many observed lines were not displayed and prints a full-output follow-up when needed. The execution order shows sudo, group, SUID/SGID, file capability, and writable-path results before broad file candidates.
+Run only the file searches you need by selecting one or more short flags. A selected run does not run the host snapshot. `-p` changes the start directory; without it, a selected search starts at `/` and stays on that filesystem.
+
+```bash
+bash ./linux-first-pass.sh -n                 # credential-related filenames
+bash ./linux-first-pass.sh -c -s -p /srv/app  # config and source files in an application
+bash ./linux-first-pass.sh -k -p /var/www     # credential-like text in small readable files
+```
+
+| Flag | File search |
+| --- | --- |
+| `-n` | Credential-related names: `*password*`, `*passwd*`, `*secret*`, `*credential*`, `*token*`, `*note*`, `*.env`, `.env.*`, `.netrc`, `.git-credentials`, `.pgpass`, `.my.cnf`, `credentials`, `config`, `kubeconfig`, `*.keytab`, `*.ccache`, `*.kdbx`; `id_*` in home paths, or anywhere under a selected `-p DIR` other than `/`. Without `-p`, it also scans the current `$HOME` when that is on another filesystem. |
+| `-c` | Config names: `*.conf`, `*.config`, `*.ini`, `*.yaml`, `*.yml`, `*.json`, `*.xml`, `*.toml`, `*.properties`, the file `config`, `.env`, and `.env.*`. |
+| `-s` | Shell scripts (`.sh`, `.bash`, `.zsh`, `.ksh`) and other source/script files (`.py`, `.pl`, `.rb`, `.php`, `.lua`, `.js`, `.ps1`). |
+| `-a` | `*_hist`, `*_history`, backup, log, SQL, archive, and database filenames. |
+| `-k` | Case-insensitive credential-like text in readable regular files smaller than 128 KiB. Prints matching paths only. |
+
+Use the actual application path from a process, service, Web configuration, or mount for `-p DIR`; a Web root is not necessarily `/var/www`. The selected start may itself be a symlink or a separate filesystem. Each search follows its start and stays on that filesystem. Inspect a selected file to confirm its content and purpose.
+When a filename matches both `-n` and `-c`, it appears in each selected category's metadata probe.
+
+The `=== ... ===` lines divide the Linux output into topics; the `[FOUND]`, `[DENIED]`, and other status lines mark individual probes within each topic. `grep -n '^=== ' first-pass.txt` lists all topics with line numbers. In `less -S first-pass.txt`, search `/^=== ` to move between topics or `/^\[` to move between probe results, then press `n` for the next match or `N` for the previous one. Each probe displays at most 500 whole stdout lines or 128 KiB. Its status reports how many observed lines were not displayed and prints a full-output follow-up when needed.
 
 ### Linux checks
 
@@ -37,18 +56,15 @@ The `=== ... ===` lines divide the Linux output into topics; the `[FOUND]`, `[DE
 | Storage and mounts | `lsblk`, `findmnt`, bounded `df -h`, selected `/etc/fstab` entries, local NFS export configuration from `/etc/exports` and immediate `*.exports` files, and optional printer status. The fstab summary suppresses option values and flags credential-like options for follow-up. |
 | SUID, SGID and file capabilities | SUID/SGID regular files from `/` and selected roots, plus bounded `getcap -r` on selected application and binary roots. When `readlink` is available, named starts that resolve to the same directory are scanned once after a successful scan; the skipped alias is printed. A failed or incomplete scan leaves its alias available for another attempt. |
 | Writable paths and logs | Writable regular files and traversable directories from `/` and focused roots; deduplicated writable log candidates with access and metadata for each file, directory, and parent. |
-| Scripts from / | Separate root-filesystem inventories for shell script extensions and other script extensions, with path metadata. |
-| Content and filename candidates from / | Credential-like text markers in readable regular files, split into `<128 KiB` and `>=128 KiB` probes with separate status and matching-path counts, plus root-filesystem inventories of interesting, config, history, backup, log, SQL, and database filenames. |
-| Home, temporary and mail candidates | Hidden and ordinary files in the current home and `/home` within printed depth limits; entries in `/tmp`, `/var/tmp`, `/dev/shm`, and file metadata in `/var/mail` and `/var/spool`. |
-| Config candidates in selected roots | Config-like filenames and content-marker paths in the current home, `/etc`, `/opt`, `/srv`, `/app`, `/usr/local/etc`, `/var/www`, `/var/backups`, `/var/lib`, `/run`, `/mnt`, `/media`, and `/root`, within printed depth and time limits. |
+| Credential-like content markers | One bounded query of readable regular files smaller than 128 KiB on the filesystem containing `/`; matching paths only. `-k` runs the same check alone, optionally from `-p DIR`. |
 
 When a process, service, cron entry, or sudo rule identifies an executable, inspect that path with `namei -l /path/to/program` and `file /path/to/program`. When a scheduled job identifies an output directory, use `find /path/to/output -xdev -type f -mtime -7 -ls` to review recent files there. Compare a selected output file's timestamps across a job interval to see whether it changes; modification time alone does not identify the writer.
 
 The PATH probe prints the raw value, the script's physical current directory, and every entry in search order, including empty entries and duplicates. Each entry shows the path checked and whether the current identity can write to and enter that directory. An empty entry or `.` checks the current directory; other relative entries use the script's current directory. `not-confirmed` means the shell could not confirm the path exists, which can also occur when access is blocked. These checks describe this script process; a sudo rule, service, or scheduled job can use another PATH and current directory.
 
-The `/` sweeps use GNU `find -xdev`, so they stay on the filesystem that contains `/`. They do not descend into a separate `/home`, `/run`, `/mnt`, or other child mount; the named scans cover selected mount roots, including `/run` config paths. Review `findmnt` and run a focused check on any other relevant mount. Root metadata sweeps have a 30-second limit each. The shell script probe lists `.sh`, `.bash`, `.zsh`, and `.ksh`; the other script probe lists `.py`, `.pl`, `.rb`, `.php`, `.lua`, `.js`, and `.ps1`. Script probes are separate from other filename candidates so their displayed rows have separate limits. Scripts without these extensions can still appear in home listings or process, service, and job paths. The root content search uses two 90-second probes: one reads files smaller than 131,072 bytes and the other reads files at least 131,072 bytes. The size predicates leave no gap; check both statuses to determine whether the scans finished. `grep -I` skips binary-looking files. A large file with no match can consume its probe's time limit; an `INCOMPLETE` status calls for a focused rerun of that probe. Both probes check case-insensitive password, passwd, secret, token, credential, API key, and private key markers in files including scripts. A match is a path to inspect, not the file content. Filename inventories use GNU `find -ls` so embedded newlines in names are escaped and each match stays on one output row. Content matches use Bash `%q` to escape path names.
+GNU `find -xdev` stays on the filesystem containing its start. The `/` searches do not enter separate child mounts; use `findmnt` to identify a relevant mount, then rerun selected categories with `-p DIR`. `-p` follows a symlink used as the start and does not limit depth. Root metadata searches have a 30-second limit each; content searches have a 90-second limit. Baseline SUID/SGID and writable scans also use bounded named roots with printed depth limits. The optional `getcap -r` check uses selected application and binary roots with an eight-second limit.
 
-Named file discovery uses GNU `find -H` to follow a symlink used as a starting root, `-xdev` to stay on that root's filesystem, the displayed depth limit, and GNU `timeout` with an eight-second limit per scan. The optional `getcap -r` check is recursive within its named roots and bounded by the same time limit. Named config-content scans read readable, config-like regular files of any size. The `/var/www` config scan can surface a `*config*.php` file even when the general `.php` script list exceeds its display limit. The `/var/mail` and `/var/spool` scans list file metadata only. The `/run` scan includes paths such as `/run/tmpfiles.d`, `/run/NetworkManager`, and `/run/systemd/resolve` when present. Hidden-name and home inventories do not depend on content markers. Optional commands and absent roots are reported as `UNAVAILABLE`. A `DENIED` scan can include paths found before access failed.
+The content marker checks look for `password`, `passwd`, `passphrase`, a `pass` assignment key, `secret`, `token`, `credential`, `api key`, and `private key`, ignoring case. `grep -I` skips binary-looking files. The 128 KiB cutoff applies to the file size, not the displayed output size. A match is a path to inspect; larger files need a selected-directory search from the notes. Filename inventories use GNU `find -ls` so embedded newlines in names are escaped and each match stays on one output row. Content matches use Bash `%q` to escape path names. Optional commands and absent roots are reported as `UNAVAILABLE`. A `DENIED` scan can include paths found before access failed.
 
 `Writable log candidates` includes writable `*.log` and `*.log.*` files anywhere scanned, plus writable regular files under `/var/log` even without a `.log` suffix. The focused `/var/log` scan covers that directory if it is a separate filesystem. Candidate rows show access for the current identity; `parent_writable=yes parent_enterable=yes` is a lead for checking whether the log directory can be renamed, not a logrotate finding. The candidate probe inherits the time limits and filesystem scopes of its source scans. Its sort has an eight-second limit, and metadata output stops between candidate paths after eight seconds. If a source writable scan fails, the candidate summary reports a non-success status and its `observed` count is partial. Check source-scan statuses to locate the gap; custom log names outside `/var/log` need selected-path follow-up.
 
@@ -58,91 +74,9 @@ Each status line names its source and scope; queries that ran also show elapsed 
 
 If a probe has undisplayed lines or an incomplete scan, it prints a rerun command that saves stdout and stderr separately, prints the exit code, then opens the saved stdout in `less`. A `find` scan rerun has no time limit; it can take much longer after an `INCOMPLETE` content scan. Other timed probes get a 30-second rerun limit; if one also times out, its unscanned range remains unknown. For a stalled `df -h`, `df -h -l` checks local filesystems separately while you investigate the remote mount. Helper probes use `--full-helper NAME` when the script is saved as a file; this runs only that helper without the display cap. When the script was streamed through stdin, save a copy first or use the matching helper key below. A full query can still fail on inaccessible directories; keep its stderr and exit code rather than treating its output count as a complete inventory.
 
-For a root key, run the corresponding query from this table. All queries start at `/`, stay on its filesystem, and use the exact predicate in the first pass. Substitute the query for `find ...` in this save-and-review pattern when the output is large:
+For a truncated file probe, copy its printed `full-output command`. The command includes the selected `-p` start directory, the exact `find` predicate, a restricted output file, separate stderr, the exit status, and `less`. A selected query is still limited to one filesystem; choose another start with `-p DIR` when the relevant files are on a separate mount.
 
-```bash
-umask 077
-find ... > "$HOME/first-pass-full.txt" 2> "$HOME/first-pass-full.err"
-printf 'find exit=%s\n' "$?"
-wc -l "$HOME/first-pass-full.txt"
-less -S "$HOME/first-pass-full.txt"
-```
-
-| Printed root key | Full query |
-| --- | --- |
-| `root:shell-scripts` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*.sh' -o -iname '*.bash' -o -iname '*.zsh' -o -iname '*.ksh' \) -ls` |
-| `root:other-scripts` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*.py' -o -iname '*.pl' -o -iname '*.rb' -o -iname '*.php' -o -iname '*.lua' -o -iname '*.js' -o -iname '*.ps1' \) -ls` |
-| `root:candidate-names` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*password*' -o -iname '*secret*' -o -iname '*credential*' -o -iname '*token*' -o -iname '*note*' -o -iname '*.env' \) -ls` |
-| `root:config-names` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini' -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' -o -iname '*.xml' -o -name 'config' \) -ls` |
-| `root:history-names` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*_hist' -o -iname '*_history' \) -ls` |
-| `root:backup-log-names` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*backup*' -o -iname '*.bak' -o -iname '*.old' -o -iname '*.log' -o -iname '*.log.*' -o -iname '*.sql' -o -iname '*.sql.gz' -o -iname '*.tgz' -o -iname '*.tar.gz' -o -iname '*.zip' -o -iname '*.db' -o -iname '*.sqlite' -o -iname '*.sqlite3' \) -ls` |
-| `root:writable` | `find / -xdev -ignore_readdir_race -mindepth 1 \( \( -type d -writable -executable \) -o \( -type f -writable \) \) -ls` |
-| `root:suid-sgid` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -perm -4000 -o -perm -2000 \) -ls` |
-
-For `root:credential-content-small` or `root:credential-content-large`, set `SIZE` to the corresponding byte predicate. The two predicates partition files at exactly 128 KiB; each query prints shell-escaped matching paths and reports grep read errors to stderr:
-
-```bash
-SIZE=-131072c   # root:credential-content-small; use +131071c for large
-find / -xdev -ignore_readdir_race -type f -readable -size "$SIZE" \
-  -exec bash -c '
-    pattern=$1
-    shift
-    grep -IilEZ "$pattern" -- "$@" |
-      while IFS= read -r -d "" path; do
-        printf "%q\n" "$path" || exit 141
-      done
-    result=("${PIPESTATUS[@]}")
-    if (( result[1] != 0 )); then exit "${result[1]}"; fi
-    if (( result[0] > 1 )); then exit 1; fi
-    exit 0
-  ' bash 'pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key' '{}' +
-```
-
-For `path:KIND`, set `ROOT` and `DEPTH` to the printed parameters. The first pass follows a symlink starting root, tests only paths at depth one or deeper, and does not cross filesystems from that root. `find -ls` escapes unusual characters so each item stays on one row:
-
-```bash
-ROOT=/etc
-DEPTH=3
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -name '.*' -ls                 # path:hidden
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -ls                           # path:temp
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f -ls                   # path:all-files
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f -readable -ls         # path:readable-files
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type d -writable -executable -ls # path:writable-dirs
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f -writable -ls         # path:writable-files
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f \( -perm -4000 -o -perm -2000 \) -ls # path:suid-sgid
-```
-
-For mail and spool metadata, set `ROOT` to `/var/mail` or `/var/spool` and `DEPTH=2`, then use `path:all-files`.
-
-For `path:config-names`, use this query. For `path:config-content`, use the next query; it reads config-like files of any size and prints shell-escaped paths that contain the general marker pattern.
-
-```bash
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f \
-  \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini' \
-     -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' \
-     -o -iname '*.xml' -o -iname '*config*.php' \
-     -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls
-
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f -readable \
-  \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini' \
-     -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' \
-     -o -iname '*.xml' -o -iname '*config*.php' \
-     -o -name '.env' -o -name 'config' -o -name 'credentials' \) \
-  -exec bash -c '
-    pattern=$1
-    shift
-    grep -IilEZ "$pattern" -- "$@" |
-      while IFS= read -r -d "" path; do
-        printf "%q\n" "$path" || exit 141
-      done
-    result=("${PIPESTATUS[@]}")
-    if (( result[1] != 0 )); then exit "${result[1]}"; fi
-    if (( result[0] > 1 )); then exit 1; fi
-    exit 0
-  ' bash 'pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key' '{}' +
-```
-
-The remaining helper keys use these full commands:
+Helper probes have these full-output sources:
 
 | Printed key | Full command or source |
 | --- | --- |

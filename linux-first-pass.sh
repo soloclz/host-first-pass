@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixed, read-only first pass for a new Linux host. Bash + common GNU Linux tools.
+# Read-only first pass for a new Linux host. Bash + common GNU Linux tools.
 set -u
 set -o pipefail
 export LC_ALL=C
@@ -583,36 +583,8 @@ build_path_scan() {
   local root=$1 depth=$2 kind=$3
   PATH_SCAN_ARGS=(-H "$root" -xdev -maxdepth "$depth" -mindepth 1)
   case $kind in
-    hidden)
-      PATH_SCAN_ARGS+=(-name '.*' -ls)
-      ;;
-    temp)
-      PATH_SCAN_ARGS+=(-ls)
-      ;;
-    all-files)
-      PATH_SCAN_ARGS+=(-type f -ls)
-      ;;
     readable-files)
       PATH_SCAN_ARGS+=(-type f -readable -ls)
-      ;;
-    config-names)
-      PATH_SCAN_ARGS+=(-type f
-        \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
-           -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
-           -o -iname '*.xml' -o -iname '*config*.php'
-           -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls)
-      ;;
-    config-content)
-      if ! have grep; then
-        printf 'grep unavailable\n' >&2
-        return 127
-      fi
-      PATH_SCAN_ARGS+=(-type f -readable
-        \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
-           -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
-           -o -iname '*.xml' -o -iname '*config*.php'
-           -o -name '.env' -o -name 'config' -o -name 'credentials' \)
-        -exec bash -c "$CONTENT_GREP_BATCH" bash "$CONTENT_MARKERS" '{}' +)
       ;;
     writable-dirs)
       PATH_SCAN_ARGS+=(-type d -writable -executable -ls)
@@ -659,18 +631,14 @@ build_root_scan() {
   ROOT_SCAN_ARGS=(-H "$root" -xdev -ignore_readdir_race)
   ROOT_SCAN_SECONDS=$ROOT_METADATA_SECONDS
   case $kind in
-    credential-content-small|credential-content-large)
+    credential-content-small)
       if ! have grep; then
         printf 'grep unavailable\n' >&2
         return 127
       fi
       ROOT_SCAN_SECONDS=$ROOT_CONTENT_SECONDS
       ROOT_SCAN_ARGS+=(-type f -readable)
-      if [[ $kind == credential-content-small ]]; then
-        ROOT_SCAN_ARGS+=(-size "-${CONTENT_SMALL_BYTES}c")
-      else
-        ROOT_SCAN_ARGS+=(-size "+$((CONTENT_SMALL_BYTES - 1))c")
-      fi
+      ROOT_SCAN_ARGS+=(-size "-${CONTENT_SMALL_BYTES}c")
       ROOT_SCAN_ARGS+=(-exec bash -c "$CONTENT_GREP_BATCH" bash "$CONTENT_MARKERS" '{}' +)
       ;;
     shell-scripts)
