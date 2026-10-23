@@ -16,7 +16,7 @@ By default the script prints every environment variable name and value in its ow
 bash ./linux-first-pass.sh --environment-names-only
 ```
 
-The default output can contain secrets from environment values, process and cron command lines, policy directives, paths, account names, and mount metadata. Save a transcript only in restricted engagement evidence. File discovery probes print candidate paths and metadata; content-marker probes read selected small files and print matching paths only. The system cron and password-policy probes print selected noncomment lines from their source files.
+The default output can contain secrets from environment values, process and cron command lines, policy directives, paths, account names, and mount metadata. Save a transcript only in restricted engagement evidence. File discovery probes print candidate paths and metadata; content-marker probes read selected readable files and print matching paths only. The system cron and password-policy probes print selected noncomment lines from their source files.
 
 The `=== ... ===` lines divide the Linux output into topics; the `[FOUND]`, `[DENIED]`, and other status lines mark individual probes within each topic. `grep -n '^=== ' first-pass.txt` lists all topics with line numbers. In `less -S first-pass.txt`, search `/^=== ` to move between topics or `/^\[` to move between probe results, then press `n` for the next match or `N` for the previous one. Each probe displays at most 500 whole stdout lines or 128 KiB. Its status reports how many observed lines were not displayed and prints a full-output follow-up when needed. The execution order shows sudo, group, SUID/SGID, file capability, and writable-path results before broad file candidates.
 
@@ -38,16 +38,16 @@ The `=== ... ===` lines divide the Linux output into topics; the `[FOUND]`, `[DE
 | SUID, SGID and file capabilities | SUID/SGID regular files from `/` and selected roots, plus bounded `getcap -r` on selected application and binary roots. When `readlink` is available, named starts that resolve to the same directory are scanned once after a successful scan; the skipped alias is printed. A failed or incomplete scan leaves its alias available for another attempt. |
 | Writable paths and logs | Writable regular files and traversable directories from `/` and focused roots; deduplicated writable log candidates with access and metadata for each file, directory, and parent. |
 | Scripts from / | Separate root-filesystem inventories for shell script extensions and other script extensions, with path metadata. |
-| Content and filename candidates from / | Readable regular files under 256 KiB checked for credential-like text markers (matching paths only), plus separate root-filesystem inventories of interesting, config, history, backup, log, SQL, and database filenames. |
+| Content and filename candidates from / | Readable regular files of any size checked for credential-like text markers (matching paths only), plus separate root-filesystem inventories of interesting, config, history, backup, log, SQL, and database filenames. |
 | Application executables and recent files | Executable files in selected application, home, and temporary roots at depth four; regular files modified within the last seven days on the root filesystem. Executability and recent modification are leads for follow-up. |
 | Home, temporary and mail candidates | Hidden and ordinary files in the current home and `/home` within printed depth limits; entries in `/tmp`, `/var/tmp`, `/dev/shm`, and file metadata in `/var/mail` and `/var/spool`. |
-| Config candidates in selected roots | Config-like filenames and content-marker paths in the current home, `/etc`, `/opt`, `/srv`, `/app`, `/usr/local/etc`, `/var/www`, `/var/backups`, `/var/lib`, `/run`, `/mnt`, `/media`, and `/root`, within printed depth and size limits. |
+| Config candidates in selected roots | Config-like filenames and content-marker paths in the current home, `/etc`, `/opt`, `/srv`, `/app`, `/usr/local/etc`, `/var/www`, `/var/backups`, `/var/lib`, `/run`, `/mnt`, `/media`, and `/root`, within printed depth and time limits. |
 
 The PATH probe prints the raw value, the script's physical current directory, and every entry in search order, including empty entries and duplicates. Each entry shows the path checked and whether the current identity can write to and enter that directory. An empty entry or `.` checks the current directory; other relative entries use the script's current directory. `not-confirmed` means the shell could not confirm the path exists, which can also occur when access is blocked. These checks describe this script process; a sudo rule, service, or scheduled job can use another PATH and current directory.
 
-The `/` sweeps use GNU `find -xdev`, so they stay on the filesystem that contains `/`. They do not descend into a separate `/home`, `/run`, `/mnt`, or other child mount; the named scans cover selected mount roots, including `/run` config paths. Review `findmnt` and run a focused check on any other relevant mount. Root metadata sweeps have a 30-second limit each. The shell script probe lists `.sh`, `.bash`, `.zsh`, and `.ksh`; the other script probe lists `.py`, `.pl`, `.rb`, `.php`, `.lua`, `.js`, and `.ps1`. Script probes are separate from other filename candidates so their displayed rows have separate limits. Scripts without these extensions can still appear in home listings or process, service, and job paths. The root content sweep has a 90-second limit, reads regular files smaller than 262,144 bytes that the current identity can open, and skips binary-looking files through `grep -I`. It checks case-insensitive password, passwd, secret, token, credential, API key, and private key markers in files including scripts. A match is a path to inspect, not the file content. Filename inventories use GNU `find -ls` so embedded newlines in names are escaped and each match stays on one output row. Content matches use Bash `%q` to escape path names.
+The `/` sweeps use GNU `find -xdev`, so they stay on the filesystem that contains `/`. They do not descend into a separate `/home`, `/run`, `/mnt`, or other child mount; the named scans cover selected mount roots, including `/run` config paths. Review `findmnt` and run a focused check on any other relevant mount. Root metadata sweeps have a 30-second limit each. The shell script probe lists `.sh`, `.bash`, `.zsh`, and `.ksh`; the other script probe lists `.py`, `.pl`, `.rb`, `.php`, `.lua`, `.js`, and `.ps1`. Script probes are separate from other filename candidates so their displayed rows have separate limits. Scripts without these extensions can still appear in home listings or process, service, and job paths. The root content sweep has a 90-second limit, reads regular files of any size that the current identity can open, and skips binary-looking files through `grep -I`. A large file with no match can consume that time limit; an `INCOMPLETE` status calls for a focused rerun. The sweep checks case-insensitive password, passwd, secret, token, credential, API key, and private key markers in files including scripts. A match is a path to inspect, not the file content. Filename inventories use GNU `find -ls` so embedded newlines in names are escaped and each match stays on one output row. Content matches use Bash `%q` to escape path names.
 
-Named file discovery uses GNU `find -H` to follow a symlink used as a starting root, `-xdev` to stay on that root's filesystem, the displayed depth limit, and GNU `timeout` with an eight-second limit per scan. The optional `getcap -r` check is recursive within its named roots and bounded by the same time limit. Named config-content scans only read readable, config-like regular files smaller than 1 MiB. The `/var/www` config scan can surface a `*config*.php` file even when the general `.php` script list exceeds its display limit. The `/var/mail` and `/var/spool` scans list file metadata only. The `/run` scan includes paths such as `/run/tmpfiles.d`, `/run/NetworkManager`, and `/run/systemd/resolve` when present. Hidden-name and home inventories do not depend on content markers. Optional commands and absent roots are reported as `UNAVAILABLE`. A `DENIED` scan can include paths found before access failed.
+Named file discovery uses GNU `find -H` to follow a symlink used as a starting root, `-xdev` to stay on that root's filesystem, the displayed depth limit, and GNU `timeout` with an eight-second limit per scan. The optional `getcap -r` check is recursive within its named roots and bounded by the same time limit. Named config-content scans read readable, config-like regular files of any size. The `/var/www` config scan can surface a `*config*.php` file even when the general `.php` script list exceeds its display limit. The `/var/mail` and `/var/spool` scans list file metadata only. The `/run` scan includes paths such as `/run/tmpfiles.d`, `/run/NetworkManager`, and `/run/systemd/resolve` when present. Hidden-name and home inventories do not depend on content markers. Optional commands and absent roots are reported as `UNAVAILABLE`. A `DENIED` scan can include paths found before access failed.
 
 `Writable log candidates` includes writable `*.log` and `*.log.*` files anywhere scanned, plus writable regular files under `/var/log` even without a `.log` suffix. The focused `/var/log` scan covers that directory if it is a separate filesystem. Candidate rows show access for the current identity; `parent_writable=yes parent_enterable=yes` is a lead for checking whether the log directory can be renamed, not a logrotate finding. The candidate probe inherits the time limits and filesystem scopes of its source scans. Its sort has an eight-second limit, and metadata output stops between candidate paths after eight seconds. If a source writable scan fails, the candidate summary reports a non-success status and its `observed` count is partial. Check source-scan statuses to locate the gap; custom log names outside `/var/log` need selected-path follow-up.
 
@@ -79,10 +79,10 @@ less -S "$HOME/first-pass-full.txt"
 | `root:writable` | `find / -xdev -ignore_readdir_race -mindepth 1 \( \( -type d -writable -executable \) -o \( -type f -writable \) \) -ls` |
 | `root:suid-sgid` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -perm -4000 -o -perm -2000 \) -ls` |
 
-For `root:credential-content`, use the same size, access, binary, and marker predicates. The query prints shell-escaped matching paths and reports grep read errors to stderr:
+For `root:credential-content`, use the same access, binary, and marker predicates. The query prints shell-escaped matching paths and reports grep read errors to stderr:
 
 ```bash
-find / -xdev -ignore_readdir_race -type f -size -262144c -readable \
+find / -xdev -ignore_readdir_race -type f -readable \
   -exec bash -c '
     pattern=$1
     shift
@@ -113,7 +113,7 @@ find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f \( -perm -4000 -o -
 
 For mail and spool metadata, set `ROOT` to `/var/mail` or `/var/spool` and `DEPTH=2`, then use `path:all-files`.
 
-For `path:config-names`, use this query. For `path:config-content`, use the next query; it limits readable files to less than 1 MiB and prints shell-escaped paths that contain the general marker pattern.
+For `path:config-names`, use this query. For `path:config-content`, use the next query; it reads config-like files of any size and prints shell-escaped paths that contain the general marker pattern.
 
 ```bash
 find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f \
@@ -122,7 +122,7 @@ find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f \
      -o -iname '*.xml' -o -iname '*config*.php' \
      -o -name '.env' -o -name 'config' -o -name 'credentials' \) -ls
 
-find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f -size -1048576c -readable \
+find -H "$ROOT" -xdev -maxdepth "$DEPTH" -mindepth 1 -type f -readable \
   \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini' \
      -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' \
      -o -iname '*.xml' -o -iname '*config*.php' \

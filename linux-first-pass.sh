@@ -11,7 +11,6 @@ MAX_STDERR_BYTES=8192
 SCAN_SECONDS=8
 ROOT_METADATA_SECONDS=30
 ROOT_CONTENT_SECONDS=90
-ROOT_FILE_BYTES=262144
 CONTENT_MARKERS='pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key'
 CONTENT_GREP_BATCH='
   pattern=$1
@@ -589,7 +588,7 @@ build_path_scan() {
         printf 'grep unavailable\n' >&2
         return 127
       fi
-      PATH_SCAN_ARGS+=(-type f -size -1048576c -readable
+      PATH_SCAN_ARGS+=(-type f -readable
         \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini'
            -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json'
            -o -iname '*.xml' -o -iname '*config*.php'
@@ -647,7 +646,7 @@ build_root_scan() {
         return 127
       fi
       ROOT_SCAN_SECONDS=$ROOT_CONTENT_SECONDS
-      ROOT_SCAN_ARGS+=(-type f -size "-${ROOT_FILE_BYTES}c" -readable
+      ROOT_SCAN_ARGS+=(-type f -readable
         -exec bash -c "$CONTENT_GREP_BATCH" bash "$CONTENT_MARKERS" '{}' +)
       ;;
     shell-scripts)
@@ -1146,8 +1145,8 @@ printf 'Time: %s | Host: %s | Identity: %s\n' \
 printf 'Scope: local Linux host, current identity, root filesystem starting at /, and named bounded file roots.\n'
 printf 'Named find scans: max depth 2-5, one filesystem per root, %ss per scan. Display cap per probe: %d lines or %d bytes.\n' \
   "$SCAN_SECONDS" "$MAX_LINES" "$MAX_BYTES"
-printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; content files < %d bytes.\n' \
-  "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS" "$ROOT_FILE_BYTES"
+printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; no file-size cutoff.\n' \
+  "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS"
 if (( ENV_NAMES_ONLY )); then
   printf 'Environment: names only from this script process.\n'
 else
@@ -1371,7 +1370,7 @@ run_probe 'Other script candidates from /' 'find / -xdev -type f (script extensi
 
 section 'Content and filename candidates from /'
 run_probe 'Credential-like text markers from /' 'find / -xdev + grep -IilE' \
-  "/ on root filesystem; readable regular files <${ROOT_FILE_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
+  "/ on root filesystem; readable regular files of any size; paths only; ${ROOT_CONTENT_SECONDS}s" \
   scan_root credential-content
 run_probe 'Interesting filenames from /' 'find / -xdev -type f' \
   "/ on root filesystem; selected name patterns; metadata only; ${ROOT_METADATA_SECONDS}s" \
@@ -1433,7 +1432,7 @@ for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups
     "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
     scan_paths "$root" "$depth" config-names
   run_probe "Config content markers in $root" 'find + grep -IilE' \
-    "$root; depth<=$depth; readable config-like files <1 MiB; paths only; ${SCAN_SECONDS}s" \
+    "$root; depth<=$depth; readable config-like files of any size; paths only; ${SCAN_SECONDS}s" \
     scan_paths "$root" "$depth" config-content
 done
 
