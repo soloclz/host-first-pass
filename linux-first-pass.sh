@@ -1151,7 +1151,7 @@ else
   printf 'Environment: names and values from this script process (shell-escaped); output may contain secrets.\n'
 fi
 
-section 'Identity, OS and runtime'
+section 'Identity and host runtime'
 run_probe 'Current identity' 'id' 'current process credentials' id
 run_probe 'Host name' 'hostname' 'local host' hostname
 run_probe 'OS release' '/etc/os-release' 'local OS release file' cat /etc/os-release
@@ -1159,10 +1159,14 @@ run_probe 'Kernel and architecture' 'uname -a' 'running kernel' uname -a
 run_probe 'Running kernel image package' 'uname -r; targeted dpkg-query -W' \
   'running kernel release; installed Debian/Ubuntu image package matching that release' show_running_kernel_package
 run_probe 'CPU' 'lscpu' 'local CPU inventory' lscpu
+run_probe 'Valid login shells' '/etc/shells' 'local shell list' cat /etc/shells
+
+section 'PATH and environment'
 run_probe 'PATH' 'script process PATH and directory checks' \
   'current script process and identity; entries in search order' show_path
 run_probe 'Environment' 'env -0' 'current script process; all exported pairs' show_environment
-run_probe 'Valid login shells' '/etc/shells' 'local shell list' cat /etc/shells
+
+section 'Packages, sudo and tools'
 run_probe 'Debian installed packages' 'dpkg-query -W' 'local dpkg database; installed rows' show_dpkg_packages
 run_probe 'pkexec mode and package' 'stat -L; targeted dpkg-query -S/-W' \
   '/usr/bin/pkexec if present; resolved file mode/owner and Debian owning package build' show_pkexec
@@ -1176,7 +1180,7 @@ run_probe 'Sudo version' 'sudo -V' 'local sudo version and plugin information' t
 run_probe 'Common tool presence' 'command -v' \
   'common transfer, interpreter, build, discovery, trace, container and filesystem commands; PATH lookup only' show_common_tools
 
-section 'Processes and local defenses'
+section 'Processes and login sessions'
 run_probe 'Running processes' 'ps -eo user,pid,ppid,lstart,cmd --forest -ww' \
   'local visible process owners, PIDs, parents, start times and command lines' \
   ps -eo user,pid,ppid,lstart,cmd --forest -ww
@@ -1189,6 +1193,8 @@ run_probe 'Last login per account' 'lastlog' 'local lastlog database; account lo
   timeout "${SCAN_SECONDS}s" lastlog
 run_probe 'Recent login history' 'last -a' 'local wtmp database; all available records' \
   timeout "${SCAN_SECONDS}s" last -a
+
+section 'Services and local defenses'
 run_probe 'Running services' 'systemctl list-units' \
   'active systemd service units if systemd is available' \
   systemctl list-units --type=service --state=running --no-legend --no-pager
@@ -1203,6 +1209,8 @@ run_probe 'AppArmor state' 'aa-status' 'local AppArmor status if tool is install
 run_probe 'UFW state' 'ufw status' 'local firewall status if tool is installed' ufw status
 run_probe 'Other defense tools' 'command -v' \
   'nft, iptables, fail2ban-client, snort command presence only' show_defense_tools
+
+section 'Scheduled jobs and log rotation'
 run_probe 'Systemd timers' 'systemctl list-timers --all' \
   'local systemd timer units if systemd is available' \
   systemctl list-timers --all --no-legend --no-pager
@@ -1295,13 +1303,15 @@ run_probe 'NFS export configuration' '/etc/exports and /etc/exports.d/*.exports'
   show_nfs_export_configs
 run_probe 'Printers' 'lpstat -p -d' 'local printer status if tool is installed' lpstat -p -d
 
-section 'Interesting file candidates'
+section 'Scripts from /'
 run_probe 'Shell script candidates from /' 'find / -xdev -type f (shell script extensions)' \
   "/ on root filesystem; .sh/.bash/.zsh/.ksh paths and metadata; ${ROOT_METADATA_SECONDS}s" \
   scan_root shell-scripts
 run_probe 'Other script candidates from /' 'find / -xdev -type f (script extensions)' \
   "/ on root filesystem; .py/.pl/.rb/.php/.lua/.js/.ps1 paths and metadata; ${ROOT_METADATA_SECONDS}s" \
   scan_root other-scripts
+
+section 'Content and filename candidates from /'
 run_probe 'Credential-like text markers from /' 'find / -xdev + grep -IilE' \
   "/ on root filesystem; readable regular files <${ROOT_FILE_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
   scan_root credential-content
@@ -1317,12 +1327,16 @@ run_probe 'History file candidates from /' 'find / -xdev -type f (history names)
 run_probe 'Backup, log and database filename candidates from /' 'find / -xdev -type f (backup/log/database names)' \
   "/ on root filesystem; backup, log, SQL, .db/.sqlite/.sqlite3 names and metadata; ${ROOT_METADATA_SECONDS}s" \
   scan_root backup-log-names
+
+section 'Application executables and recent files'
 run_probe 'Executable candidates in application roots' 'find custom roots -executable -ls' \
   "/usr/local/bin,/usr/local/sbin,/opt,/srv,/app,/home and temporary roots; depth<=4; ${ROOT_METADATA_SECONDS}s" \
   scan_application_executables
 run_probe 'Recently modified file candidates from /' 'find / -xdev -mtime -7 -ls' \
   "/ on root filesystem; regular files modified within 7 days; one metadata snapshot; ${ROOT_METADATA_SECONDS}s" \
   scan_root recent-files
+
+section 'Home, temporary and mail candidates'
 if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
   run_probe 'Hidden paths in current home' 'find hidden names' \
     "$HOME; depth<=4; same filesystem; ${SCAN_SECONDS}s" \
@@ -1352,6 +1366,7 @@ for root in /var/mail /var/spool; do
     scan_paths "$root" 2 all-files
 done
 
+section 'Config candidates in selected roots'
 for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups /var/lib /run /mnt /media /root; do
   [[ -n $root ]] || continue
   depth=3
@@ -1364,13 +1379,10 @@ for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups
     scan_paths "$root" "$depth" config-content
 done
 
-section 'Writable and privilege-related file candidates'
+section 'Writable paths and logs'
 run_probe 'Writable paths from /' 'find / -xdev -writable' \
   "/ on root filesystem; writable regular files and writable traversable directories; ${ROOT_METADATA_SECONDS}s" \
   scan_root writable
-run_probe 'SUID or SGID files from /' 'find / -xdev -perm -4000/-2000' \
-  "/ on root filesystem; regular files; ${ROOT_METADATA_SECONDS}s" \
-  scan_root suid-sgid
 for root in "${WRITABLE_ROOTS[@]}"; do
   [[ -n $root ]] || continue
   depth=3
@@ -1386,6 +1398,11 @@ done
 run_probe 'Writable log candidates' 'root:writable and focused writable-files scans' \
   'deduplicated writable *.log/*.log.* paths and files under /var/log; file, log directory and parent access; upstream scan limits apply' \
   show_writable_log_candidates
+
+section 'SUID, SGID and file capabilities'
+run_probe 'SUID or SGID files from /' 'find / -xdev -perm -4000/-2000' \
+  "/ on root filesystem; regular files; ${ROOT_METADATA_SECONDS}s" \
+  scan_root suid-sgid
 for root in /bin /sbin /usr/bin /usr/sbin /usr/local /opt /srv /app /var/www /mnt /media; do
   run_probe "SUID or SGID files in $root" 'find -perm -4000/-2000' \
     "$root; depth<=3; same filesystem; ${SCAN_SECONDS}s" \
