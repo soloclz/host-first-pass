@@ -62,7 +62,7 @@ case $# in
         show_path|show_environment|show_passwd_accounts|show_groups|show_resolver|show_fstab|show_nfs_export_configs|\
         show_defense_tools|show_common_tools|show_system_cron_entries|\
         show_cron_directory_entries|show_current_crontab|show_password_policy_clues|\
-        show_ad_join_clues|show_dpkg_packages|show_running_kernel_package|show_pkexec|show_apk_packages|show_current_ssh|\
+        show_ad_join_clues|show_dpkg_packages|show_running_kernel_package|show_user_namespace_limits|show_pkexec|show_apk_packages|show_current_ssh|\
         show_history_paths|show_cron_paths|show_group_sockets|\
         show_disk_device_access|show_logrotate_configs|show_writable_log_candidates) FULL_HELPER=$2 ;;
         *) usage >&2; exit 2 ;;
@@ -880,6 +880,21 @@ show_running_kernel_package() {
   fi
 }
 
+show_user_namespace_limits() {
+  local path value failed=0
+  for path in /proc/sys/kernel/unprivileged_userns_clone /proc/sys/user/max_user_namespaces; do
+    if [[ ! -e $path ]]; then
+      printf 'path=%s status=absent\n' "$path" || return 141
+    elif IFS= read -r value < "$path"; then
+      printf 'path=%s status=readable value=%q\n' "$path" "$value" || return 141
+    else
+      printf 'path=%s status=read-failed\n' "$path" || return 141
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
 show_pkexec() {
   local path=/usr/bin/pkexec resolved metadata owner_row package row status name version rc
   [[ -e $path || -L $path ]] || return 0
@@ -1207,6 +1222,8 @@ run_probe 'Logrotate configuration paths' '/etc/logrotate.conf and /etc/logrotat
   show_logrotate_configs
 
 section 'Container and namespace context'
+run_probe 'User namespace limits' '/proc/sys/kernel/unprivileged_userns_clone; /proc/sys/user/max_user_namespaces' \
+  'current procfs; read-only sysctl values or absence, not a namespace creation test' show_user_namespace_limits
 run_probe 'PID 1 cgroup' '/proc/1/cgroup' 'PID 1 in current PID namespace' cat /proc/1/cgroup
 run_probe 'PID 1 and script namespace links' '/proc/1/ns and /proc/self/ns' \
   'namespace links visible in current procfs' ls -l /proc/1/ns /proc/self/ns
