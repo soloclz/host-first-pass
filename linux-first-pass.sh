@@ -1166,19 +1166,56 @@ run_probe 'PATH' 'script process PATH and directory checks' \
   'current script process and identity; entries in search order' show_path
 run_probe 'Environment' 'env -0' 'current script process; all exported pairs' show_environment
 
-section 'Packages, sudo and tools'
-run_probe 'Debian installed packages' 'dpkg-query -W' 'local dpkg database; installed rows' show_dpkg_packages
+section 'Sudo, packages and tools'
+run_probe 'Sudo rules' 'sudo -n -l' 'current identity; no password prompt' env LC_ALL=C sudo -n -l
+run_probe 'Sudo version' 'sudo -V' 'local sudo version and plugin information' timeout "${SCAN_SECONDS}s" sudo -V
 run_probe 'pkexec mode and package' 'stat -L; targeted dpkg-query -S/-W' \
   '/usr/bin/pkexec if present; resolved file mode/owner and Debian owning package build' show_pkexec
+run_probe 'Debian installed packages' 'dpkg-query -W' 'local dpkg database; installed rows' show_dpkg_packages
 run_probe 'RPM installed packages' 'rpm -qa' 'local RPM database' \
   rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}.%{ARCH}\t%{EPOCH}\n'
 run_probe 'Arch installed packages' 'pacman -Q' 'local pacman database' pacman -Q
 run_probe 'Alpine installed packages' 'apk v2 info -v / v3 list --installed --manifest' \
   'local apk database; command selected by apk-tools major version' show_apk_packages
-run_probe 'Sudo rules' 'sudo -n -l' 'current identity; no password prompt' env LC_ALL=C sudo -n -l
-run_probe 'Sudo version' 'sudo -V' 'local sudo version and plugin information' timeout "${SCAN_SECONDS}s" sudo -V
 run_probe 'Common tool presence' 'command -v' \
   'common transfer, interpreter, build, discovery, trace, container and filesystem commands; PATH lookup only' show_common_tools
+
+section 'Accounts and home directories'
+run_probe 'Local passwd accounts' '/etc/passwd (selected fields)' \
+  'local passwd file; hash values suppressed; NSS users may be elsewhere' show_passwd_accounts
+run_probe 'Local groups' '/etc/group (selected fields)' \
+  'local group file; NSS groups may be elsewhere' show_groups
+run_probe 'Password policy file clues' 'login.defs, security and PAM files' \
+  'noncomment lines of common local policy files; effective PAM path requires follow-up' show_password_policy_clues
+run_probe 'AD join clues' 'realm list and identity configuration paths' \
+  'realm list when installed, plus metadata for sssd.conf, krb5.conf and realmd.conf' show_ad_join_clues
+run_probe 'Home root' 'ls -la /home' 'top level of /home' ls -la /home
+if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
+  run_probe 'Current home' 'ls -la' "top level of $HOME" ls -la "$HOME"
+  run_probe 'Current .ssh' 'ls -la' "$HOME/.ssh top level; no file contents" show_current_ssh
+  run_probe 'History paths' 'ls -ld' "$HOME shell history metadata; no contents" show_history_paths
+else
+  printf '[UNAVAILABLE] Current home, .ssh and history | source: HOME | scope: current script process | HOME unset or not a directory\n'
+fi
+
+if in_group adm || in_group docker || in_group lxd || in_group disk; then
+  section 'Privileged group resources'
+  if in_group adm; then
+    run_probe 'adm readable logs' 'find /var/log -xdev -type f -readable -ls' \
+      "/var/log; depth<=5; same filesystem; file metadata only; ${SCAN_SECONDS}s" \
+      scan_paths /var/log 5 readable-files
+  fi
+  if in_group docker || in_group lxd; then
+    run_probe 'docker/lxd sockets' 'stat known local Unix sockets + test -w' \
+      'current identity; /var/run/docker.sock, /run/docker.sock, and common LXD sockets; metadata and writable test only' \
+      show_group_sockets
+  fi
+  if in_group disk; then
+    run_probe 'disk block devices' 'find /dev -xdev -type b + test -r/-w + stat' \
+      "/dev; current identity; effective readable/writable checks; ${SCAN_SECONDS}s" \
+      show_disk_device_access
+  fi
+fi
 
 section 'Processes and login sessions'
 run_probe 'Running processes' 'ps -eo user,pid,ppid,lstart,cmd --forest -ww' \
@@ -1238,43 +1275,6 @@ run_probe 'PID 1 and script namespace links' '/proc/1/ns and /proc/self/ns' \
 run_probe 'Root mount' 'findmnt -T /' 'filesystem containing / in current mount namespace' findmnt -T /
 probe_docker_images
 
-section 'Accounts and home directories'
-run_probe 'Local passwd accounts' '/etc/passwd (selected fields)' \
-  'local passwd file; hash values suppressed; NSS users may be elsewhere' show_passwd_accounts
-run_probe 'Local groups' '/etc/group (selected fields)' \
-  'local group file; NSS groups may be elsewhere' show_groups
-run_probe 'Password policy file clues' 'login.defs, security and PAM files' \
-  'noncomment lines of common local policy files; effective PAM path requires follow-up' show_password_policy_clues
-run_probe 'AD join clues' 'realm list and identity configuration paths' \
-  'realm list when installed, plus metadata for sssd.conf, krb5.conf and realmd.conf' show_ad_join_clues
-run_probe 'Home root' 'ls -la /home' 'top level of /home' ls -la /home
-if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then
-  run_probe 'Current home' 'ls -la' "top level of $HOME" ls -la "$HOME"
-  run_probe 'Current .ssh' 'ls -la' "$HOME/.ssh top level; no file contents" show_current_ssh
-  run_probe 'History paths' 'ls -ld' "$HOME shell history metadata; no contents" show_history_paths
-else
-  printf '[UNAVAILABLE] Current home, .ssh and history | source: HOME | scope: current script process | HOME unset or not a directory\n'
-fi
-
-if in_group adm || in_group docker || in_group lxd || in_group disk; then
-  section 'Privileged group resources'
-  if in_group adm; then
-    run_probe 'adm readable logs' 'find /var/log -xdev -type f -readable -ls' \
-      "/var/log; depth<=5; same filesystem; file metadata only; ${SCAN_SECONDS}s" \
-      scan_paths /var/log 5 readable-files
-  fi
-  if in_group docker || in_group lxd; then
-    run_probe 'docker/lxd sockets' 'stat known local Unix sockets + test -w' \
-      'current identity; /var/run/docker.sock, /run/docker.sock, and common LXD sockets; metadata and writable test only' \
-      show_group_sockets
-  fi
-  if in_group disk; then
-    run_probe 'disk block devices' 'find /dev -xdev -type b + test -r/-w + stat' \
-      "/dev; current identity; effective readable/writable checks; ${SCAN_SECONDS}s" \
-      show_disk_device_access
-  fi
-fi
-
 section 'Network'
 run_probe 'Interfaces and addresses' 'ip address show' 'local network interfaces' ip address show
 run_probe 'Routes' 'ip route show' 'current network namespace routes' ip route show
@@ -1302,6 +1302,39 @@ run_probe 'NFS export configuration' '/etc/exports and /etc/exports.d/*.exports'
   'local NFS server config; file metadata and readable noncomment lines' \
   show_nfs_export_configs
 run_probe 'Printers' 'lpstat -p -d' 'local printer status if tool is installed' lpstat -p -d
+
+section 'SUID, SGID and file capabilities'
+run_probe 'SUID or SGID files from /' 'find / -xdev -perm -4000/-2000' \
+  "/ on root filesystem; regular files; ${ROOT_METADATA_SECONDS}s" \
+  scan_root suid-sgid
+for root in /bin /sbin /usr/bin /usr/sbin /usr/local /opt /srv /app /var/www /mnt /media; do
+  run_probe "SUID or SGID files in $root" 'find -perm -4000/-2000' \
+    "$root; depth<=3; same filesystem; ${SCAN_SECONDS}s" \
+    scan_paths "$root" 3 suid-sgid
+done
+run_probe 'File capabilities' 'getcap -r' \
+  "existing /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /srv /app; ${SCAN_SECONDS}s" \
+  scan_capabilities
+
+section 'Writable paths and logs'
+run_probe 'Writable paths from /' 'find / -xdev -writable' \
+  "/ on root filesystem; writable regular files and writable traversable directories; ${ROOT_METADATA_SECONDS}s" \
+  scan_root writable
+for root in "${WRITABLE_ROOTS[@]}"; do
+  [[ -n $root ]] || continue
+  depth=3
+  [[ -n $CURRENT_HOME && $root == "$CURRENT_HOME" ]] && depth=4
+  [[ $root == /var/log ]] && depth=5
+  run_probe "Writable directories in $root" 'find -type d -writable -executable' \
+    "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
+    scan_paths "$root" "$depth" writable-dirs
+  run_probe "Writable files in $root" 'find -type f -writable' \
+    "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
+    scan_paths "$root" "$depth" writable-files
+done
+run_probe 'Writable log candidates' 'root:writable and focused writable-files scans' \
+  'deduplicated writable *.log/*.log.* paths and files under /var/log; file, log directory and parent access; upstream scan limits apply' \
+  show_writable_log_candidates
 
 section 'Scripts from /'
 run_probe 'Shell script candidates from /' 'find / -xdev -type f (shell script extensions)' \
@@ -1378,38 +1411,5 @@ for root in "${HOME:-}" /etc /opt /srv /app /usr/local/etc /var/www /var/backups
     "$root; depth<=$depth; readable config-like files <1 MiB; paths only; ${SCAN_SECONDS}s" \
     scan_paths "$root" "$depth" config-content
 done
-
-section 'Writable paths and logs'
-run_probe 'Writable paths from /' 'find / -xdev -writable' \
-  "/ on root filesystem; writable regular files and writable traversable directories; ${ROOT_METADATA_SECONDS}s" \
-  scan_root writable
-for root in "${WRITABLE_ROOTS[@]}"; do
-  [[ -n $root ]] || continue
-  depth=3
-  [[ -n $CURRENT_HOME && $root == "$CURRENT_HOME" ]] && depth=4
-  [[ $root == /var/log ]] && depth=5
-  run_probe "Writable directories in $root" 'find -type d -writable -executable' \
-    "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
-    scan_paths "$root" "$depth" writable-dirs
-  run_probe "Writable files in $root" 'find -type f -writable' \
-    "$root; depth<=$depth; same filesystem; ${SCAN_SECONDS}s" \
-    scan_paths "$root" "$depth" writable-files
-done
-run_probe 'Writable log candidates' 'root:writable and focused writable-files scans' \
-  'deduplicated writable *.log/*.log.* paths and files under /var/log; file, log directory and parent access; upstream scan limits apply' \
-  show_writable_log_candidates
-
-section 'SUID, SGID and file capabilities'
-run_probe 'SUID or SGID files from /' 'find / -xdev -perm -4000/-2000' \
-  "/ on root filesystem; regular files; ${ROOT_METADATA_SECONDS}s" \
-  scan_root suid-sgid
-for root in /bin /sbin /usr/bin /usr/sbin /usr/local /opt /srv /app /var/www /mnt /media; do
-  run_probe "SUID or SGID files in $root" 'find -perm -4000/-2000' \
-    "$root; depth<=3; same filesystem; ${SCAN_SECONDS}s" \
-    scan_paths "$root" 3 suid-sgid
-done
-run_probe 'File capabilities' 'getcap -r' \
-  "existing /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /srv /app; ${SCAN_SECONDS}s" \
-  scan_capabilities
 
 printf '\nCandidate paths are leads. Read a selected file to verify content and context. For undisplayed rows or incomplete scans, use the printed full-output follow-up.\n'
