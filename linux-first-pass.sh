@@ -265,15 +265,6 @@ show_followup() {
         printf '  full-output: README.md Linux full-output follow-up key=scan_capabilities\n'
       fi
       ;;
-    scan_application_executables)
-      if build_application_roots; then
-        printf '  full-output command: umask 077; LC_ALL=C '
-        printf '%q ' find "${APPLICATION_ROOTS[@]}" -xdev -maxdepth 4 -type f -executable -ls
-        print_save_tail
-      else
-        printf '  full-output: README.md Linux full-output follow-up key=scan_application_executables\n'
-      fi
-      ;;
     show_dpkg_packages)
       printf '  full-output command: umask 077; set -o pipefail; { '
       printf '%q ' dpkg-query -W '-f=${db:Status-Abbrev}\t${binary:Package}\t${Version}\n'
@@ -690,9 +681,6 @@ build_root_scan() {
            -o -iname '*.tar.gz' -o -iname '*.zip' -o -iname '*.db'
            -o -iname '*.sqlite' -o -iname '*.sqlite3' \) -ls)
       ;;
-    recent-files)
-      ROOT_SCAN_ARGS+=(-mindepth 1 -type f -mtime -7 -ls)
-      ;;
     writable)
       ROOT_SCAN_ARGS+=(-mindepth 1
         \( \( -type d -writable -executable \) -o \( -type f -writable \) \) -ls)
@@ -822,30 +810,6 @@ show_ad_join_clues() {
   if (( realm_rc == 124 || realm_rc == 137 )); then return "$realm_rc"; fi
   if (( realm_rc != 0 )); then failed=1; fi
   return "$failed"
-}
-
-APPLICATION_ROOTS=()
-build_application_roots() {
-  local root
-  APPLICATION_ROOTS=()
-  for root in /usr/local/bin /usr/local/sbin /opt /srv /app /home \
-              /tmp /var/tmp /dev/shm; do
-    [[ -d $root ]] && APPLICATION_ROOTS+=("$root")
-  done
-  if (( ${#APPLICATION_ROOTS[@]} == 0 )); then
-    printf 'no application scan roots exist\n' >&2
-    return 4
-  fi
-}
-
-scan_application_executables() {
-  if ! have find || ! have timeout; then
-    printf 'find or timeout unavailable\n' >&2
-    return 127
-  fi
-  build_application_roots || return $?
-  timeout -k 2s "${ROOT_METADATA_SECONDS}s" find "${APPLICATION_ROOTS[@]}" \
-    -xdev -maxdepth 4 -type f -executable -ls
 }
 
 show_dpkg_packages() {
@@ -1393,14 +1357,6 @@ run_probe 'History file candidates from /' 'find / -xdev -type f (history names)
 run_probe 'Backup, log and database filename candidates from /' 'find / -xdev -type f (backup/log/database names)' \
   "/ on root filesystem; backup, log, SQL, .db/.sqlite/.sqlite3 names and metadata; ${ROOT_METADATA_SECONDS}s" \
   scan_root backup-log-names
-
-section 'Application executables and recent files'
-run_probe 'Executable candidates in application roots' 'find custom roots -executable -ls' \
-  "/usr/local/bin,/usr/local/sbin,/opt,/srv,/app,/home and temporary roots; depth<=4; ${ROOT_METADATA_SECONDS}s" \
-  scan_application_executables
-run_probe 'Recently modified file candidates from /' 'find / -xdev -mtime -7 -ls' \
-  "/ on root filesystem; regular files modified within 7 days; one metadata snapshot; ${ROOT_METADATA_SECONDS}s" \
-  scan_root recent-files
 
 section 'Home, temporary and mail candidates'
 if [[ -n ${HOME:-} && -d ${HOME:-} ]]; then

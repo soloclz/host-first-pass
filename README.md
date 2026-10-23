@@ -39,9 +39,10 @@ The `=== ... ===` lines divide the Linux output into topics; the `[FOUND]`, `[DE
 | Writable paths and logs | Writable regular files and traversable directories from `/` and focused roots; deduplicated writable log candidates with access and metadata for each file, directory, and parent. |
 | Scripts from / | Separate root-filesystem inventories for shell script extensions and other script extensions, with path metadata. |
 | Content and filename candidates from / | Credential-like text markers in readable regular files, split into `<128 KiB` and `>=128 KiB` probes with separate status and matching-path counts, plus root-filesystem inventories of interesting, config, history, backup, log, SQL, and database filenames. |
-| Application executables and recent files | Executable files in selected application, home, and temporary roots at depth four; regular files modified within the last seven days on the root filesystem. Executability and recent modification are leads for follow-up. |
 | Home, temporary and mail candidates | Hidden and ordinary files in the current home and `/home` within printed depth limits; entries in `/tmp`, `/var/tmp`, `/dev/shm`, and file metadata in `/var/mail` and `/var/spool`. |
 | Config candidates in selected roots | Config-like filenames and content-marker paths in the current home, `/etc`, `/opt`, `/srv`, `/app`, `/usr/local/etc`, `/var/www`, `/var/backups`, `/var/lib`, `/run`, `/mnt`, `/media`, and `/root`, within printed depth and time limits. |
+
+When a process, service, cron entry, or sudo rule identifies an executable, inspect that path with `namei -l /path/to/program` and `file /path/to/program`. When a scheduled job identifies an output directory, use `find /path/to/output -xdev -type f -mtime -7 -ls` to review recent files there. Compare a selected output file's timestamps across a job interval to see whether it changes; modification time alone does not identify the writer.
 
 The PATH probe prints the raw value, the script's physical current directory, and every entry in search order, including empty entries and duplicates. Each entry shows the path checked and whether the current identity can write to and enter that directory. An empty entry or `.` checks the current directory; other relative entries use the script's current directory. `not-confirmed` means the shell could not confirm the path exists, which can also occur when access is blocked. These checks describe this script process; a sudo rule, service, or scheduled job can use another PATH and current directory.
 
@@ -75,7 +76,6 @@ less -S "$HOME/first-pass-full.txt"
 | `root:config-names` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*.conf' -o -iname '*.config' -o -iname '*.ini' -o -iname '*.yaml' -o -iname '*.yml' -o -iname '*.json' -o -iname '*.xml' -o -name 'config' \) -ls` |
 | `root:history-names` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*_hist' -o -iname '*_history' \) -ls` |
 | `root:backup-log-names` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -iname '*backup*' -o -iname '*.bak' -o -iname '*.old' -o -iname '*.log' -o -iname '*.log.*' -o -iname '*.sql' -o -iname '*.sql.gz' -o -iname '*.tgz' -o -iname '*.tar.gz' -o -iname '*.zip' -o -iname '*.db' -o -iname '*.sqlite' -o -iname '*.sqlite3' \) -ls` |
-| `root:recent-files` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f -mtime -7 -ls` |
 | `root:writable` | `find / -xdev -ignore_readdir_race -mindepth 1 \( \( -type d -writable -executable \) -o \( -type f -writable \) \) -ls` |
 | `root:suid-sgid` | `find / -xdev -ignore_readdir_race -mindepth 1 -type f \( -perm -4000 -o -perm -2000 \) -ls` |
 
@@ -146,7 +146,6 @@ The remaining helper keys use these full commands:
 
 | Printed key | Full command or source |
 | --- | --- |
-| `scan_application_executables` | `find /usr/local/bin /usr/local/sbin /opt /srv /app /home /tmp /var/tmp /dev/shm -xdev -maxdepth 4 -type f -executable -ls` (remove any absent start paths, as the script does). |
 | `scan_capabilities` | `getcap -r /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /srv /app` (remove absent roots). |
 | `show_environment` | Recheck the current process environment with `env -0` and the Bash NUL loop below. A later shell has its own current environment, which can differ from the earlier script process. |
 | `show_path` | `bash ./linux-first-pass.sh --full-helper show_path` prints the uncapped PATH entries and directory checks for the rerun process. |
