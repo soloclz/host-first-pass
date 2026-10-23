@@ -11,6 +11,7 @@ MAX_STDERR_BYTES=8192
 SCAN_SECONDS=8
 ROOT_METADATA_SECONDS=30
 ROOT_CONTENT_SECONDS=90
+CONTENT_SMALL_BYTES=131072
 CONTENT_MARKERS='pass(word|wd)?|secret|token|credential|api[_-]?key|private[_-]?key'
 CONTENT_GREP_BATCH='
   pattern=$1
@@ -640,14 +641,19 @@ build_root_scan() {
   ROOT_SCAN_ARGS=(/ -xdev -ignore_readdir_race)
   ROOT_SCAN_SECONDS=$ROOT_METADATA_SECONDS
   case $kind in
-    credential-content)
+    credential-content-small|credential-content-large)
       if ! have grep; then
         printf 'grep unavailable\n' >&2
         return 127
       fi
       ROOT_SCAN_SECONDS=$ROOT_CONTENT_SECONDS
-      ROOT_SCAN_ARGS+=(-type f -readable
-        -exec bash -c "$CONTENT_GREP_BATCH" bash "$CONTENT_MARKERS" '{}' +)
+      ROOT_SCAN_ARGS+=(-type f -readable)
+      if [[ $kind == credential-content-small ]]; then
+        ROOT_SCAN_ARGS+=(-size "-${CONTENT_SMALL_BYTES}c")
+      else
+        ROOT_SCAN_ARGS+=(-size "+$((CONTENT_SMALL_BYTES - 1))c")
+      fi
+      ROOT_SCAN_ARGS+=(-exec bash -c "$CONTENT_GREP_BATCH" bash "$CONTENT_MARKERS" '{}' +)
       ;;
     shell-scripts)
       ROOT_SCAN_ARGS+=(-mindepth 1 -type f
@@ -1145,8 +1151,8 @@ printf 'Time: %s | Host: %s | Identity: %s\n' \
 printf 'Scope: local Linux host, current identity, root filesystem starting at /, and named bounded file roots.\n'
 printf 'Named find scans: max depth 2-5, one filesystem per root, %ss per scan. Display cap per probe: %d lines or %d bytes.\n' \
   "$SCAN_SECONDS" "$MAX_LINES" "$MAX_BYTES"
-printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; no file-size cutoff.\n' \
-  "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS"
+printf 'Root find scans: / on one filesystem, %ss metadata or %ss content per scan; content split at %d bytes.\n' \
+  "$ROOT_METADATA_SECONDS" "$ROOT_CONTENT_SECONDS" "$CONTENT_SMALL_BYTES"
 if (( ENV_NAMES_ONLY )); then
   printf 'Environment: names only from this script process.\n'
 else
@@ -1369,9 +1375,12 @@ run_probe 'Other script candidates from /' 'find / -xdev -type f (script extensi
   scan_root other-scripts
 
 section 'Content and filename candidates from /'
-run_probe 'Credential-like text markers from /' 'find / -xdev + grep -IilE' \
-  "/ on root filesystem; readable regular files of any size; paths only; ${ROOT_CONTENT_SECONDS}s" \
-  scan_root credential-content
+run_probe 'Credential-like text markers in small files from /' 'find / -xdev + grep -IilE' \
+  "/ on root filesystem; readable regular files <${CONTENT_SMALL_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
+  scan_root credential-content-small
+run_probe 'Credential-like text markers in large files from /' 'find / -xdev + grep -IilE' \
+  "/ on root filesystem; readable regular files >=${CONTENT_SMALL_BYTES} bytes; paths only; ${ROOT_CONTENT_SECONDS}s" \
+  scan_root credential-content-large
 run_probe 'Interesting filenames from /' 'find / -xdev -type f' \
   "/ on root filesystem; selected name patterns; metadata only; ${ROOT_METADATA_SECONDS}s" \
   scan_root candidate-names
